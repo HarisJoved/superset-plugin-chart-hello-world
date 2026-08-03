@@ -27,6 +27,11 @@ export interface SupersetPluginChartHelloWorldStylesProps {
 
 interface SupersetPluginChartHelloWorldCustomizeProps {
   headerText: string;
+  // 3D Model Viewer controls
+  glbUrl: string;
+  meshColumn: string;
+  colorColumn: string;
+  backgroundColor: string;
 }
 
 export type SupersetPluginChartHelloWorldQueryFormData = QueryFormData &

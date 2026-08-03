@@ -22,7 +22,7 @@ import {
   sharedControls,
 } from '@superset-ui/chart-controls';
 
-// Safe translation function wrapper to prevent 't is not a function' crashes in modern Superset
+// Safe translation wrapper avoiding TranslatorSingleton crashes on module load
 const t = typeof coreT === 'function' ? coreT : (str: string) => str;
 
 const config: ControlPanelConfig = {
@@ -37,7 +37,9 @@ const config: ControlPanelConfig = {
             config: {
               ...sharedControls.groupby,
               label: t('Columns'),
-              description: t('Columns to group by'),
+              description: t(
+                'Columns to fetch — must include your mesh-name and color-value columns',
+              ),
             },
           },
         ],
@@ -60,18 +62,98 @@ const config: ControlPanelConfig = {
       ],
     },
     {
-      label: t('Hello Controls!'),
+      label: t('3D Model Viewer'),
       expanded: true,
+      controlSetRows: [
+        [
+          {
+            name: 'glb_url',
+            config: {
+              type: 'TextControl',
+              default: '',
+              renderTrigger: true,
+              label: t('GLB Model URL'),
+              description: t(
+                'Relative path (e.g. /static/assets/Duck.glb), Base64 string, or remote HTTP URL',
+              ),
+            },
+          },
+        ],
+        [
+          {
+            name: 'mesh_column',
+            config: {
+              type: 'SelectControl',
+              freeForm: true,
+              label: t('Mesh Name Column'),
+              description: t(
+                'Column whose values match mesh/object names inside the GLB file',
+              ),
+              renderTrigger: true,
+              mapStateToProps: (state: any) => ({
+                choices: (state.datasource?.columns || []).map(
+                  (c: { column_name: string }) => [
+                    c.column_name,
+                    c.column_name,
+                  ],
+                ),
+              }),
+              validators: [validateNonEmpty],
+            },
+          },
+        ],
+        [
+          {
+            name: 'color_column',
+            config: {
+              type: 'SelectControl',
+              freeForm: true,
+              label: t('Color Value Column'),
+              description: t(
+                'Numeric column used to compute the color applied to each matching mesh',
+              ),
+              renderTrigger: true,
+              mapStateToProps: (state: any) => ({
+                choices: (state.datasource?.columns || []).map(
+                  (c: { column_name: string }) => [
+                    c.column_name,
+                    c.column_name,
+                  ],
+                ),
+              }),
+              validators: [validateNonEmpty],
+            },
+          },
+        ],
+        [
+          {
+            name: 'background_color',
+            config: {
+              type: 'TextControl',
+              default: '#f8fafc',
+              renderTrigger: true,
+              label: t('Background Color'),
+              description: t(
+                'Hex color for the viewer background, e.g. #f8fafc',
+              ),
+            },
+          },
+        ],
+      ],
+    },
+    {
+      label: t('Header'),
+      expanded: false,
       controlSetRows: [
         [
           {
             name: 'header_text',
             config: {
               type: 'TextControl',
-              default: 'Hello, World!',
+              default: '3D Model Viewer',
               renderTrigger: true,
               label: t('Header Text'),
-              description: t('The text you want to see in the header'),
+              description: t('Optional caption overlaid on the viewer'),
             },
           },
         ],

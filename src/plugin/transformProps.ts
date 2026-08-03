@@ -20,14 +20,20 @@ import { ChartProps, TimeseriesDataRecord } from '@superset-ui/core';
 
 export default function transformProps(chartProps: ChartProps) {
   const { width, height, formData, queriesData } = chartProps;
-  const { boldText, headerFontSize, headerText } = formData;
+  const {
+    boldText,
+    headerFontSize,
+    headerText,
+    glbUrl,
+    meshColumn,
+    colorColumn,
+    backgroundColor,
+  } = formData;
 
   // Safe check in case queriesData[0] is undefined during initial load/state change
   const data = (queriesData && queriesData[0]?.data)
     ? (queriesData[0].data as TimeseriesDataRecord[])
     : [];
-
-  console.log('formData via TransformProps.ts', formData);
 
   return {
     width,
@@ -36,5 +42,9 @@ export default function transformProps(chartProps: ChartProps) {
     boldText,
     headerFontSize,
     headerText,
+    glbUrl,
+    meshColumn,
+    colorColumn,
+    backgroundColor,
   };
 }
