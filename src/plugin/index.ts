@@ -38,8 +38,8 @@ export default class SupersetPluginChartHelloWorld extends ChartPlugin {
    */
   constructor() {
     const metadata = new ChartMetadata({
-      description: 'Interactive 3D (.glb) Model Viewer',
-      name: t('3D Model Viewer'),
+      description: 'Interactive 3D device viewer with clickable markers, driven by an uploaded JSON file',
+      name: t('3D Device Viewer'),
       thumbnail,
     });
 

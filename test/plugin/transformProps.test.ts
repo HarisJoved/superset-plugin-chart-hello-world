@@ -21,23 +21,20 @@ import transformProps from '../../src/plugin/transformProps';
 
 describe('SupersetPluginChartHelloWorld transformProps', () => {
   const formData = {
-    colorScheme: 'bnbColors',
     datasource: '3__table',
     granularity_sqla: 'ds',
-    metric: 'sum__num',
-    series: 'name',
     boldText: true,
     headerFontSize: 'xs',
     headerText: 'my text',
+    sceneDataJson: '{"devices":[{"deviceId":"d1","deviceName":"Test Device","modelId":"m1","modelName":"Test Model","position":[0,0,0]}]}',
+    backgroundColor: '#f8fafc',
   };
   const chartProps = new ChartProps({
     formData,
     width: 800,
     height: 600,
     theme: supersetTheme,
-    queriesData: [{
-      data: [{ name: 'Hulk', sum__num: 1 }],
-    }],
+    queriesData: [{ data: [] }],
   });
 
   it('should transform chart props for viz', () => {
@@ -47,7 +44,8 @@ describe('SupersetPluginChartHelloWorld transformProps', () => {
       boldText: true,
       headerFontSize: 'xs',
       headerText: 'my text',
-      data: [{ name: 'Hulk', sum__num: 1 }],
+      sceneDataJson: '{"devices":[{"deviceId":"d1","deviceName":"Test Device","modelId":"m1","modelName":"Test Model","position":[0,0,0]}]}',
+      backgroundColor: '#f8fafc',
     });
   });
 });

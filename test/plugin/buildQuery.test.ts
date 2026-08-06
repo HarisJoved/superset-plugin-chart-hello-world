@@ -22,13 +22,24 @@ describe('SupersetPluginChartHelloWorld buildQuery', () => {
   const formData = {
     datasource: '5__table',
     granularity_sqla: 'ds',
-    series: 'foo',
     viz_type: 'my_chart',
   };
 
-  it('should build groupby with series in form data', () => {
+  it('should build a minimal query with row_limit 1', () => {
     const queryContext = buildQuery(formData);
     const [query] = queryContext.queries;
-    expect(query.columns).toEqual(['foo']);
+    expect(query.row_limit).toEqual(1);
+  });
+
+  it('should include a dataset-agnostic metric so the query is non-empty', () => {
+    const queryContext = buildQuery(formData);
+    const [query] = queryContext.queries;
+    expect(query.metrics).toEqual([
+      {
+        expressionType: 'SQL',
+        sqlExpression: '1',
+        label: 'dummy_metric',
+      },
+    ]);
   });
 });

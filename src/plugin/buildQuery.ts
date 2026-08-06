@@ -18,12 +18,30 @@
  */
 import { buildQueryContext, QueryFormData, QueryObject } from '@superset-ui/core';
 
+/**
+ * This chart no longer reads any dataset rows — the scene comes entirely
+ * from the uploaded JSON file (see controlPanel.ts / types.ts). Superset's
+ * Explore view still requires a dataset to be selected and still fires a
+ * query before rendering, so we keep this minimal purely to satisfy that
+ * framework requirement; transformProps ignores the result.
+ *
+ * A literal SQL metric (SELECT 1) is used instead of leaving metrics
+ * empty, because Superset's backend rejects a query with no columns or
+ * metrics at all ("Empty query?" / 400). This metric works against any
+ * dataset regardless of its actual columns.
+ */
 export default function buildQuery(formData: QueryFormData) {
-  const { cols: groupby } = formData;
   return buildQueryContext(formData, (baseQueryObject: QueryObject) => [
     {
       ...baseQueryObject,
-      groupby,
+      metrics: [
+        {
+          expressionType: 'SQL',
+          sqlExpression: '1',
+          label: 'dummy_metric',
+        },
+      ],
+      row_limit: 1,
     },
   ]);
 }

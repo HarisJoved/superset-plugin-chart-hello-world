@@ -16,7 +16,7 @@
  * specific language governing permissions and limitations
  * under the License.
  */
-import { QueryFormData, TimeseriesDataRecord } from '@superset-ui/core';
+import { QueryFormData } from '@superset-ui/core';
 
 export interface SupersetPluginChartHelloWorldStylesProps {
   height: number;
@@ -25,12 +25,39 @@ export interface SupersetPluginChartHelloWorldStylesProps {
   boldText: boolean;
 }
 
+/**
+ * One device entry in the uploaded JSON file. `position` is a plain
+ * [x, y, z] tuple (not an {x,y,z} object) to match the exported format.
+ * Extra fields (anything beyond what's listed) are preserved and shown
+ * in the click info panel, since upstream exports may carry additional
+ * metadata we don't need to know about in advance.
+ */
+export interface DeviceDatum {
+  modelId: string;
+  modelName: string;
+  deviceId: string;
+  deviceName: string;
+  position: [number, number, number];
+  markerColor?: string;
+  markerSize?: number;
+  [key: string]: unknown;
+}
+
+export interface SceneData {
+  modelUrl?: string;
+  resourceId?: string;
+  resourceName?: string;
+  devices: DeviceDatum[];
+  exportedAt?: string;
+  /** Optional uniform scale applied to the loaded model. Defaults to 1. */
+  modelScale?: number;
+  /** Optional [x,y,z] offset applied to the loaded model's position. */
+  modelOffset?: [number, number, number];
+}
+
 interface SupersetPluginChartHelloWorldCustomizeProps {
   headerText: string;
-  // 3D Model Viewer controls
-  glbUrl: string;
-  meshColumn: string;
-  colorColumn: string;
+  sceneDataJson: string;
   backgroundColor: string;
 }
 
@@ -40,6 +67,4 @@ export type SupersetPluginChartHelloWorldQueryFormData = QueryFormData &
 
 export type SupersetPluginChartHelloWorldProps =
   SupersetPluginChartHelloWorldStylesProps &
-    SupersetPluginChartHelloWorldCustomizeProps & {
-      data: TimeseriesDataRecord[];
-    };
+    SupersetPluginChartHelloWorldCustomizeProps;

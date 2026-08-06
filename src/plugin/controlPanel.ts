@@ -16,112 +16,38 @@
  * specific language governing permissions and limitations
  * under the License.
  */
-import { t as coreT, validateNonEmpty } from '@superset-ui/core';
-import {
-  ControlPanelConfig,
-  sharedControls,
-} from '@superset-ui/chart-controls';
+import { t as coreT } from '@superset-ui/core';
+import { ControlPanelConfig } from '@superset-ui/chart-controls';
+import JsonFileUploadControl from './controls/JsonFileUploadControl';
 
 // Safe translation wrapper avoiding TranslatorSingleton crashes on module load
 const t = typeof coreT === 'function' ? coreT : (str: string) => str;
 
+/**
+ * Every section below uses `tabOverride: 'customize'`, which moves it out
+ * of Superset's default "Data" tab and into "Customize" instead. We don't
+ * define any Query-tab sections at all, so the Data tab is effectively
+ * empty — this chart doesn't run a real analytical query; the scene comes
+ * entirely from the uploaded JSON file.
+ */
 const config: ControlPanelConfig = {
   controlPanelSections: [
     {
-      label: t('Query'),
+      label: t('Sensor Scene'),
       expanded: true,
+      tabOverride: 'customize',
       controlSetRows: [
         [
           {
-            name: 'cols',
+            name: 'scene_data_json',
             config: {
-              ...sharedControls.groupby,
-              label: t('Columns'),
+              type: JsonFileUploadControl,
+              renderTrigger: true,
+              label: t('Sensor Scene JSON'),
               description: t(
-                'Columns to fetch — must include your mesh-name and color-value columns',
+                'Upload a .json file with a top-level "devices" array, and optionally a "modelUrl" pointing to a hosted .glb file. Each device needs a deviceId, a position [x,y,z], and optionally deviceName, modelName, markerColor, and markerSize. Click a marker in the viewer to see its full data.',
               ),
-            },
-          },
-        ],
-        [
-          {
-            name: 'metrics',
-            config: {
-              ...sharedControls.metrics,
-              validators: [validateNonEmpty],
-            },
-          },
-        ],
-        ['adhoc_filters'],
-        [
-          {
-            name: 'row_limit',
-            config: sharedControls.row_limit,
-          },
-        ],
-      ],
-    },
-    {
-      label: t('3D Model Viewer'),
-      expanded: true,
-      controlSetRows: [
-        [
-          {
-            name: 'glb_url',
-            config: {
-              type: 'TextControl',
               default: '',
-              renderTrigger: true,
-              label: t('GLB Model URL'),
-              description: t(
-                'Relative path (e.g. /static/assets/Duck.glb), Base64 string, or remote HTTP URL',
-              ),
-            },
-          },
-        ],
-        [
-          {
-            name: 'mesh_column',
-            config: {
-              type: 'SelectControl',
-              freeForm: true,
-              label: t('Mesh Name Column'),
-              description: t(
-                'Column whose values match mesh/object names inside the GLB file',
-              ),
-              renderTrigger: true,
-              mapStateToProps: (state: any) => ({
-                choices: (state.datasource?.columns || []).map(
-                  (c: { column_name: string }) => [
-                    c.column_name,
-                    c.column_name,
-                  ],
-                ),
-              }),
-              validators: [validateNonEmpty],
-            },
-          },
-        ],
-        [
-          {
-            name: 'color_column',
-            config: {
-              type: 'SelectControl',
-              freeForm: true,
-              label: t('Color Value Column'),
-              description: t(
-                'Numeric column used to compute the color applied to each matching mesh',
-              ),
-              renderTrigger: true,
-              mapStateToProps: (state: any) => ({
-                choices: (state.datasource?.columns || []).map(
-                  (c: { column_name: string }) => [
-                    c.column_name,
-                    c.column_name,
-                  ],
-                ),
-              }),
-              validators: [validateNonEmpty],
             },
           },
         ],
@@ -144,13 +70,14 @@ const config: ControlPanelConfig = {
     {
       label: t('Header'),
       expanded: false,
+      tabOverride: 'customize',
       controlSetRows: [
         [
           {
             name: 'header_text',
             config: {
               type: 'TextControl',
-              default: '3D Model Viewer',
+              default: '3D Device Viewer',
               renderTrigger: true,
               label: t('Header Text'),
               description: t('Optional caption overlaid on the viewer'),

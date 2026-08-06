@@ -16,35 +16,25 @@
  * specific language governing permissions and limitations
  * under the License.
  */
-import { ChartProps, TimeseriesDataRecord } from '@superset-ui/core';
+import { ChartProps } from '@superset-ui/core';
 
 export default function transformProps(chartProps: ChartProps) {
-  const { width, height, formData, queriesData } = chartProps;
+  const { width, height, formData } = chartProps;
   const {
     boldText,
     headerFontSize,
     headerText,
-    glbUrl,
-    meshColumn,
-    colorColumn,
+    sceneDataJson,
     backgroundColor,
   } = formData;
-
-  // Safe check in case queriesData[0] is undefined during initial load/state change
-  const data = (queriesData && queriesData[0]?.data)
-    ? (queriesData[0].data as TimeseriesDataRecord[])
-    : [];
 
   return {
     width,
     height,
-    data,
     boldText,
     headerFontSize,
     headerText,
-    glbUrl,
-    meshColumn,
-    colorColumn,
+    sceneDataJson,
     backgroundColor,
   };
 }
