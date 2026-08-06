@@ -26,7 +26,11 @@ export default function transformProps(chartProps: ChartProps) {
     headerText,
     sceneDataJson,
     backgroundColor,
+    cameraZoom,
+    showLabels,
   } = formData;
+
+  const parsedZoom = Number(cameraZoom);
 
   return {
     width,
@@ -36,5 +40,9 @@ export default function transformProps(chartProps: ChartProps) {
     headerText,
     sceneDataJson,
     backgroundColor,
+    // TextControl hands back a string; fall back to a plain fit when it's
+    // blank or nonsense rather than pushing the camera to NaN.
+    cameraZoom: Number.isFinite(parsedZoom) && parsedZoom > 0 ? parsedZoom : 1,
+    showLabels: showLabels !== false,
   };
 }

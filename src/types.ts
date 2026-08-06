@@ -59,6 +59,10 @@ interface SupersetPluginChartHelloWorldCustomizeProps {
   headerText: string;
   sceneDataJson: string;
   backgroundColor: string;
+  /** Multiplier on the auto-fit camera distance. 1 = fit model to viewport. */
+  cameraZoom?: number;
+  /** Whether to draw the billboard name label next to each marker. */
+  showLabels?: boolean;
 }
 
 export type SupersetPluginChartHelloWorldQueryFormData = QueryFormData &

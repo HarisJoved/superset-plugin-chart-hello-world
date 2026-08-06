@@ -18,7 +18,7 @@
  */
 import { t as coreT } from '@superset-ui/core';
 import { ControlPanelConfig } from '@superset-ui/chart-controls';
-import JsonFileUploadControl from './controls/JsonFileUploadControl';
+import SensorSceneControl from './controls/SensorSceneControl';
 
 // Safe translation wrapper avoiding TranslatorSingleton crashes on module load
 const t = typeof coreT === 'function' ? coreT : (str: string) => str;
@@ -41,16 +41,23 @@ const config: ControlPanelConfig = {
           {
             name: 'scene_data_json',
             config: {
-              type: JsonFileUploadControl,
+              type: SensorSceneControl,
               renderTrigger: true,
               label: t('Sensor Scene JSON'),
               description: t(
-                'Upload a .json file with a top-level "devices" array, and optionally a "modelUrl" pointing to a hosted .glb file. Each device needs a deviceId, a position [x,y,z], and optionally deviceName, modelName, markerColor, and markerSize. Click a marker in the viewer to see its full data.',
+                'Upload a .json file with a top-level "devices" array, and optionally a "modelUrl" pointing to a hosted .glb file. Each device needs a deviceId, a position [x,y,z], and optionally deviceName, modelName, markerColor, and markerSize. Once loaded, expand a sensor below to change its colour, size, and position.',
               ),
               default: '',
             },
           },
         ],
+      ],
+    },
+    {
+      label: t('Viewer'),
+      expanded: true,
+      tabOverride: 'customize',
+      controlSetRows: [
         [
           {
             name: 'background_color',
@@ -61,6 +68,35 @@ const config: ControlPanelConfig = {
               label: t('Background Color'),
               description: t(
                 'Hex color for the viewer background, e.g. #f8fafc',
+              ),
+            },
+          },
+        ],
+        [
+          {
+            name: 'camera_zoom',
+            config: {
+              type: 'TextControl',
+              isFloat: true,
+              default: 1,
+              renderTrigger: true,
+              label: t('Camera Zoom'),
+              description: t(
+                'How tightly the initial view frames the model. 1 fits the whole model to the viewport; raise it (e.g. 1.5) to start closer in, lower it to pull back.',
+              ),
+            },
+          },
+        ],
+        [
+          {
+            name: 'show_labels',
+            config: {
+              type: 'CheckboxControl',
+              default: true,
+              renderTrigger: true,
+              label: t('Show Sensor Labels'),
+              description: t(
+                'Draw each sensor name next to its marker. Turn off to de-clutter scenes with many sensors — names are still shown when you click a marker.',
               ),
             },
           },

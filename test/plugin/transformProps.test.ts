@@ -28,6 +28,8 @@ describe('SupersetPluginChartHelloWorld transformProps', () => {
     headerText: 'my text',
     sceneDataJson: '{"devices":[{"deviceId":"d1","deviceName":"Test Device","modelId":"m1","modelName":"Test Model","position":[0,0,0]}]}',
     backgroundColor: '#f8fafc',
+    cameraZoom: 1,
+    showLabels: true,
   };
   const chartProps = new ChartProps({
     formData,
@@ -46,6 +48,34 @@ describe('SupersetPluginChartHelloWorld transformProps', () => {
       headerText: 'my text',
       sceneDataJson: '{"devices":[{"deviceId":"d1","deviceName":"Test Device","modelId":"m1","modelName":"Test Model","position":[0,0,0]}]}',
       backgroundColor: '#f8fafc',
+      cameraZoom: 1,
+      showLabels: true,
     });
+  });
+
+  it('falls back to a plain fit when cameraZoom is blank or invalid', () => {
+    const props = transformProps(
+      new ChartProps({
+        formData: { ...formData, cameraZoom: '' },
+        width: 800,
+        height: 600,
+        theme: supersetTheme,
+        queriesData: [{ data: [] }],
+      }),
+    );
+    expect(props.cameraZoom).toEqual(1);
+  });
+
+  it('respects an explicitly disabled label toggle', () => {
+    const props = transformProps(
+      new ChartProps({
+        formData: { ...formData, showLabels: false },
+        width: 800,
+        height: 600,
+        theme: supersetTheme,
+        queriesData: [{ data: [] }],
+      }),
+    );
+    expect(props.showLabels).toEqual(false);
   });
 });

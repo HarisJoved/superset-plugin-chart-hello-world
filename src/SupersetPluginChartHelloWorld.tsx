@@ -25,25 +25,67 @@ import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
 // eslint-disable-next-line import/extensions
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
 import { DeviceDatum, SceneData, SupersetPluginChartHelloWorldProps } from './types';
+import {
+  Position3,
+  emitPick,
+  getPickTarget,
+  setModelInfo,
+  setPickTarget,
+  subscribeState,
+} from './sensorEditorBridge';
 
-/** Builds a small canvas texture with the device's name for a billboard label. */
-function makeLabelSprite(text: string): THREE.Sprite {
+/** Fallback world size used to derive marker/label scale before a model has
+ * loaded (or when the scene has no model at all). */
+const FALLBACK_WORLD_SIZE = 5;
+
+const FALLBACK_MARKER_COLOR = '#2563eb';
+
+/**
+ * The marker colour, guarded against values THREE can't parse. The editor's
+ * hex text field is edited character by character, so a half-typed "#25"
+ * legitimately reaches us; THREE would log an "Unknown color" warning per
+ * marker per keystroke and render it black.
+ */
+function markerColorOf(device: DeviceDatum): string {
+  if (typeof device.markerColor !== 'string') return FALLBACK_MARKER_COLOR;
+  const value = device.markerColor.trim();
+  if (/^#(?:[0-9a-f]{3}|[0-9a-f]{6})$/i.test(value)) return value;
+  // CSS named colours ("red", "steelblue") are valid THREE input too.
+  if (/^[a-z]+$/i.test(value)) return value;
+  return FALLBACK_MARKER_COLOR;
+}
+
+/**
+ * Builds a small canvas texture with the device's name for a billboard
+ * label. `worldWidth` is how wide the label should be *in scene units* —
+ * labels used to be a hardcoded 1.2 units across, which on a 5-unit model
+ * meant every name was a quarter of the model wide and the markers looked
+ * enormous next to the building.
+ */
+function makeLabelSprite(text: string, worldWidth: number): THREE.Sprite {
   const canvas = document.createElement('canvas');
+  canvas.width = 512;
+  canvas.height = 128;
   const ctx = canvas.getContext('2d');
-  const fontSize = 42;
-  canvas.width = 256;
-  canvas.height = 64;
   if (ctx) {
-    ctx.font = `${fontSize}px sans-serif`;
-    ctx.fillStyle = 'rgba(15, 23, 42, 0.9)';
+    ctx.font = '600 64px sans-serif';
+    ctx.fillStyle = 'rgba(15, 23, 42, 0.92)';
     ctx.textAlign = 'center';
     ctx.textBaseline = 'middle';
-    ctx.fillText(text, canvas.width / 2, canvas.height / 2, canvas.width - 8);
+    ctx.lineWidth = 8;
+    ctx.strokeStyle = 'rgba(255, 255, 255, 0.85)';
+    ctx.strokeText(text, canvas.width / 2, canvas.height / 2, canvas.width - 16);
+    ctx.fillText(text, canvas.width / 2, canvas.height / 2, canvas.width - 16);
   }
   const texture = new THREE.CanvasTexture(canvas);
-  const material = new THREE.SpriteMaterial({ map: texture, depthTest: false });
+  texture.colorSpace = THREE.SRGBColorSpace;
+  const material = new THREE.SpriteMaterial({
+    map: texture,
+    depthTest: false,
+    transparent: true,
+  });
   const sprite = new THREE.Sprite(material);
-  sprite.scale.set(1.2, 0.3, 1);
+  sprite.scale.set(worldWidth, worldWidth * (canvas.height / canvas.width), 1);
   return sprite;
 }
 
@@ -51,25 +93,39 @@ function makeLabelSprite(text: string): THREE.Sprite {
  * Builds the group of device marker meshes + labels. Marker meshes are
  * also pushed into `markerMeshesOut` (with the source device stashed in
  * `userData.device`) so the click handler can raycast against them and
- * look up which device was hit. Takes a plain devices array (not the
- * whole SceneData) so it can be rebuilt from `workingDevices`  the
- * live, user-editable copy of the positions  rather than only the
- * originally uploaded JSON.
+ * look up which device was hit.
+ *
+ * `worldSize` is the model's largest dimension and drives the *defaults*:
+ * a device with no explicit `markerSize` gets one proportional to the model
+ * instead of a fixed 0.03 that is invisible on a large model and a boulder
+ * on a small one. Explicit sizes from the editor are always respected.
  */
 function buildDeviceGroup(
   devices: DeviceDatum[],
   markerMeshesOut: THREE.Mesh[],
+  worldSize: number,
+  showLabels: boolean,
 ): THREE.Group {
   const group = new THREE.Group();
+  const defaultRadius = worldSize * 0.012;
 
   devices.forEach(device => {
     const [x, y, z] = device.position || [0, 0, 0];
     const pos = new THREE.Vector3(x || 0, y || 0, z || 0);
-    const radius = device.markerSize || 0.03;
+    const radius =
+      typeof device.markerSize === 'number' && device.markerSize > 0
+        ? device.markerSize
+        : defaultRadius;
 
-    const geometry = new THREE.SphereGeometry(radius, 16, 16);
+    const geometry = new THREE.SphereGeometry(radius, 20, 20);
+    const color = new THREE.Color(markerColorOf(device));
     const material = new THREE.MeshStandardMaterial({
-      color: device.markerColor || '#2563eb',
+      color,
+      // A touch of self-illumination keeps markers readable when they sit in
+      // the model's shadow, without washing the chosen colour out.
+      emissive: color,
+      emissiveIntensity: 0.25,
+      roughness: 0.4,
     });
     const mesh = new THREE.Mesh(geometry, material);
     mesh.position.copy(pos);
@@ -77,9 +133,14 @@ function buildDeviceGroup(
     group.add(mesh);
     markerMeshesOut.push(mesh);
 
-    if (device.deviceName || device.deviceId) {
-      const label = makeLabelSprite(device.deviceName || device.deviceId);
-      label.position.copy(pos).add(new THREE.Vector3(0, radius + 0.15, 0));
+    if (showLabels && (device.deviceName || device.deviceId)) {
+      const label = makeLabelSprite(
+        device.deviceName || device.deviceId,
+        worldSize * 0.18,
+      );
+      label.position
+        .copy(pos)
+        .add(new THREE.Vector3(0, radius + worldSize * 0.03, 0));
       group.add(label);
     }
   });
@@ -87,27 +148,21 @@ function buildDeviceGroup(
   return group;
 }
 
-function makePendingMarker(size: number): THREE.Mesh {
-  const geometry = new THREE.SphereGeometry(size, 16, 16);
-  const material = new THREE.MeshStandardMaterial({
-    color: '#f59e0b',
-    emissive: '#f59e0b',
-    emissiveIntensity: 0.4,
-  });
-  return new THREE.Mesh(geometry, material);
-}
-
 function disposeObject3D(obj: THREE.Object3D) {
   obj.traverse(node => {
     const mesh = node as THREE.Mesh;
-    if ((mesh as THREE.Mesh).isMesh) {
-      mesh.geometry?.dispose();
-      const mat = mesh.material as THREE.Material | THREE.Material[];
-      if (Array.isArray(mat)) {
-        mat.forEach(m => m.dispose());
-      } else {
-        mat?.dispose();
-      }
+    const sprite = node as THREE.Sprite;
+    if (mesh.isMesh || sprite.isSprite) {
+      (mesh as THREE.Mesh).geometry?.dispose();
+      const mat = (node as THREE.Mesh).material as
+        | THREE.Material
+        | THREE.Material[];
+      const materials = Array.isArray(mat) ? mat : [mat];
+      materials.forEach(m => {
+        const withMap = m as THREE.Material & { map?: THREE.Texture };
+        withMap?.map?.dispose();
+        m?.dispose();
+      });
     }
   });
 }
@@ -123,6 +178,8 @@ export default function SupersetPluginChartHelloWorld(
     headerText,
     sceneDataJson,
     backgroundColor,
+    cameraZoom = 1,
+    showLabels = true,
   } = props;
 
   const containerRef = useRef<HTMLDivElement>(null);
@@ -133,24 +190,20 @@ export default function SupersetPluginChartHelloWorld(
   const modelGroupRef = useRef<THREE.Group | null>(null);
   const deviceGroupRef = useRef<THREE.Group | null>(null);
   const markerMeshesRef = useRef<THREE.Mesh[]>([]);
-  const pendingMarkerRef = useRef<THREE.Mesh | null>(null);
   const raycasterRef = useRef<THREE.Raycaster>(new THREE.Raycaster());
   const animationFrameRef = useRef<number>(0);
+  // Always-fresh reference to frameCamera, so effects that fire on model
+  // load use the *current* cameraZoom rather than the value captured when
+  // the effect was registered.
+  const frameCameraRef = useRef<() => void>(() => {});
 
   const [error, setError] = useState<string>('');
   const [modelError, setModelError] = useState<string>('');
   const [selectedDevice, setSelectedDevice] = useState<DeviceDatum | null>(null);
-
-  // Live, user-editable copy of the devices list. Repositioning via the
-  // click-to-place workflow updates this, not the original uploaded JSON 
-  // "Copy Devices JSON" is how the result gets back out.
-  const [workingDevices, setWorkingDevices] = useState<DeviceDatum[]>([]);
-  const [pickerDeviceId, setPickerDeviceId] = useState<string | null>(null);
-  const [pickModeOn, setPickModeOn] = useState<boolean>(false);
-  const [pendingPosition, setPendingPosition] = useState<
-    [number, number, number] | null
-  >(null);
-  const [copyFeedback, setCopyFeedback] = useState<string>('');
+  const [modelWorldSize, setModelWorldSize] = useState<number | null>(null);
+  // deviceId the control panel is waiting on a click for, mirrored from the
+  // sensor-editor bridge into React state so the overlay can react to it.
+  const [pickTargetId, setPickTargetId] = useState<string | null>(null);
 
   const fontSizes: Record<string, string> = {
     xxs: '12px',
@@ -179,48 +232,122 @@ export default function SupersetPluginChartHelloWorld(
     }
   }, [sceneDataJson]);
 
-  // Reset the working copy + picker UI whenever a genuinely new file is
-  // uploaded (not on every re-render).
-  useEffect(() => {
-    setWorkingDevices(sceneData?.devices ? [...sceneData.devices] : []);
-    setPickerDeviceId(null);
-    setPickModeOn(false);
-    setPendingPosition(null);
-    setSelectedDevice(null);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [sceneDataJson]);
+  const devices = sceneData?.devices ?? [];
+  // Serialised marker inputs — lets the marker-rebuild effect fire on colour
+  // / size / position edits from the control panel without also refetching
+  // the GLB every time an unrelated part of the scene JSON changes.
+  const deviceSignature = JSON.stringify(
+    devices.map(d => [d.deviceId, d.deviceName, d.position, d.markerColor, d.markerSize]),
+  );
 
-  /** Frames the camera/controls target around whatever's currently in the scene. */
+  // Mirror the control panel's pick request into local state.
+  useEffect(() => {
+    const sync = () => setPickTargetId(getPickTarget());
+    sync();
+    return subscribeState(sync);
+  }, []);
+
+  // Clear any stale pick request if the viewer goes away mid-pick.
+  useEffect(() => () => setPickTarget(null), []);
+
+  /**
+   * Frames the camera so the model fills the viewport.
+   *
+   * The previous version used the bounding box's max dimension directly as a
+   * per-axis camera offset (`maxDim * 1.8 + 2` on x, y *and* z), which puts
+   * the camera roughly 1.6x further out than that number again along the
+   * diagonal — about 3x too far for a typical model, hence "everything is
+   * tiny until I zoom in". This instead measures how much of the viewport the
+   * model's bounding box actually covers and closes in until it fills ~92% of
+   * the tighter axis, so the fit holds for any model size or aspect ratio.
+   */
   function frameCamera() {
     const camera = cameraRef.current;
     const controls = controlsRef.current;
     const scene = sceneRef.current;
     if (!camera || !controls || !scene) return;
 
+    // Prefer framing on the model alone. Devices can sit well outside the
+    // model (bad coordinates, or not yet positioned) and would otherwise
+    // blow the bounding box up and shrink the model on screen.
     const box = new THREE.Box3();
-    let hasContent = false;
-    scene.traverse(node => {
-      const mesh = node as THREE.Mesh;
-      if ((mesh as THREE.Mesh).isMesh) {
-        box.expandByObject(node);
-        hasContent = true;
-      }
-    });
-    if (!hasContent) return;
+    if (modelGroupRef.current) {
+      box.setFromObject(modelGroupRef.current);
+    } else {
+      let hasContent = false;
+      scene.traverse(node => {
+        if ((node as THREE.Mesh).isMesh) {
+          box.expandByObject(node);
+          hasContent = true;
+        }
+      });
+      if (!hasContent) return;
+    }
+    if (box.isEmpty()) return;
 
-    const center = box.getCenter(new THREE.Vector3());
-    const size = box.getSize(new THREE.Vector3());
-    const maxDim = Math.max(size.x, size.y, size.z, 1);
-    const distance = maxDim * 1.8 + 2;
-    camera.position.set(
-      center.x + distance,
-      center.y + distance * 0.7,
-      center.z + distance,
-    );
+    const sphere = box.getBoundingSphere(new THREE.Sphere());
+    const center = sphere.center.clone();
+    const radius = Math.max(sphere.radius, 1e-4);
+
+    // Pleasant three-quarter view. The camera always sits exactly `distance`
+    // along this direction from the centre.
+    const direction = new THREE.Vector3(1, 0.55, 1).normalize();
+    const place = (dist: number) => {
+      camera.position.copy(center).add(direction.clone().multiplyScalar(dist));
+      // Scale the clip planes to the scene, or small models get clipped by
+      // the fixed 0.1 near plane and huge ones lose depth precision. `far` is
+      // generous enough to cover orbiting out to `controls.maxDistance`,
+      // otherwise the model vanishes when the user zooms out.
+      camera.near = Math.max(dist / 200, 1e-6);
+      camera.far = dist * 30 + radius * 10;
+      camera.updateProjectionMatrix();
+      camera.lookAt(center);
+      camera.updateMatrixWorld();
+    };
+
+    const vFov = (camera.fov * Math.PI) / 180;
+    const hFov = 2 * Math.atan(Math.tan(vFov / 2) * camera.aspect);
+    // Fitting the bounding *sphere* is the easy closed form, but it's very
+    // conservative — a cube's sphere is 1.7x its width, so the model would
+    // only fill ~60% of the frame. Use it as a first guess, then measure the
+    // box's actual on-screen extent and close in. Three passes is plenty.
+    let distance = radius / Math.sin(Math.min(vFov, hFov) / 2);
+    const corners = [
+      new THREE.Vector3(box.min.x, box.min.y, box.min.z),
+      new THREE.Vector3(box.min.x, box.min.y, box.max.z),
+      new THREE.Vector3(box.min.x, box.max.y, box.min.z),
+      new THREE.Vector3(box.min.x, box.max.y, box.max.z),
+      new THREE.Vector3(box.max.x, box.min.y, box.min.z),
+      new THREE.Vector3(box.max.x, box.min.y, box.max.z),
+      new THREE.Vector3(box.max.x, box.max.y, box.min.z),
+      new THREE.Vector3(box.max.x, box.max.y, box.max.z),
+    ];
+    // How much of the viewport the model should span, 0-1.
+    const targetFill = 0.92;
+    for (let pass = 0; pass < 3; pass += 1) {
+      place(distance);
+      let extent = 0;
+      corners.forEach(corner => {
+        const ndc = corner.clone().project(camera);
+        extent = Math.max(extent, Math.abs(ndc.x), Math.abs(ndc.y));
+      });
+      if (extent <= 1e-6) break;
+      // Perspective makes this non-linear, hence iterating; clamp each step
+      // so a corner landing behind the camera can't send it flying.
+      const scale = Math.min(Math.max(extent / targetFill, 0.25), 4);
+      distance *= scale;
+    }
+
+    const zoom = cameraZoom > 0 ? cameraZoom : 1;
+    distance /= zoom;
+    place(distance);
+
     controls.target.copy(center);
-    camera.lookAt(center);
+    controls.minDistance = radius * 0.02;
+    controls.maxDistance = distance * 20;
     controls.update();
   }
+  frameCameraRef.current = frameCamera;
 
   function raycastMarkersAt(clientX: number, clientY: number): THREE.Intersection[] {
     const renderer = rendererRef.current;
@@ -236,7 +363,7 @@ export default function SupersetPluginChartHelloWorld(
     return raycasterRef.current.intersectObjects(markers, false);
   }
 
-  /** Raycasts against the loaded model's real geometry  used for the
+  /** Raycasts against the loaded model's real geometry — used for the
    * click-to-place workflow, so a captured position always lands exactly
    * where the user clicked in the same coordinate space the model
    * already renders in. No scale/offset guessing required. */
@@ -255,16 +382,16 @@ export default function SupersetPluginChartHelloWorld(
   }
 
   // Base scene setup (renderer, camera, lights, environment, controls).
-  // Runs once on mount and whenever the background color changes; does
-  // NOT reload the model or rebuild device markers, so those can update
-  // independently. Click/hover handling lives in its own effect below
-  // since it needs to react to pick-mode state changes.
+  // Mount-only: it must NOT re-run for prop changes, because rebuilding the
+  // THREE.Scene here would throw away the loaded model and the device markers
+  // without the effects that own them re-running to put them back (that's
+  // what used to blank the viewer when the background colour was edited).
+  // The background colour is applied in place by its own effect below.
   useEffect(() => {
     const container = containerRef.current;
     if (!container) return undefined;
 
     const scene = new THREE.Scene();
-    scene.background = new THREE.Color(backgroundColor || '#f8fafc');
     sceneRef.current = scene;
 
     const camera = new THREE.PerspectiveCamera(
@@ -321,28 +448,34 @@ export default function SupersetPluginChartHelloWorld(
       }
       if (modelGroupRef.current) disposeObject3D(modelGroupRef.current);
       if (deviceGroupRef.current) disposeObject3D(deviceGroupRef.current);
-      if (pendingMarkerRef.current) disposeObject3D(pendingMarkerRef.current);
       modelGroupRef.current = null;
       deviceGroupRef.current = null;
-      pendingMarkerRef.current = null;
       markerMeshesRef.current = [];
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // Recolour the existing scene in place rather than rebuilding it.
+  useEffect(() => {
+    if (!sceneRef.current) return;
+    sceneRef.current.background = new THREE.Color(backgroundColor || '#f8fafc');
   }, [backgroundColor]);
 
-  // Click/hover handling. Re-registered whenever pick mode or the active
-  // picker device changes, so the listener always reads fresh state
-  // without relying on stale closures over React state.
+  // Click/hover handling. Re-registered whenever the pick target changes, so
+  // the listener always reads fresh state without stale closures.
   useEffect(() => {
     const renderer = rendererRef.current;
     if (!renderer) return undefined;
 
     const handleClick = (event: MouseEvent) => {
-      if (pickModeOn && pickerDeviceId) {
+      if (pickTargetId) {
         const hits = raycastModelAt(event.clientX, event.clientY);
         if (hits.length > 0) {
           const p = hits[0].point;
-          setPendingPosition([p.x, p.y, p.z]);
+          // Hand the position back to the sensor editor in the control
+          // panel; it writes it into the scene JSON, which flows back down
+          // here as new props and moves the marker.
+          emitPick(pickTargetId, [p.x, p.y, p.z] as Position3);
         }
         return;
       }
@@ -357,7 +490,7 @@ export default function SupersetPluginChartHelloWorld(
     };
 
     const handleMouseMove = (event: MouseEvent) => {
-      if (pickModeOn) {
+      if (pickTargetId) {
         renderer.domElement.style.cursor = 'crosshair';
         return;
       }
@@ -365,16 +498,22 @@ export default function SupersetPluginChartHelloWorld(
       renderer.domElement.style.cursor = hits.length > 0 ? 'pointer' : 'default';
     };
 
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape' && pickTargetId) setPickTarget(null);
+    };
+
     renderer.domElement.addEventListener('click', handleClick);
     renderer.domElement.addEventListener('mousemove', handleMouseMove);
+    window.addEventListener('keydown', handleKeyDown);
 
     return () => {
       renderer.domElement.removeEventListener('click', handleClick);
       renderer.domElement.removeEventListener('mousemove', handleMouseMove);
+      window.removeEventListener('keydown', handleKeyDown);
       renderer.domElement.style.cursor = 'default';
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [pickModeOn, pickerDeviceId]);
+  }, [pickTargetId]);
 
   // Load / reload the GLB model whenever modelUrl changes.
   useEffect(() => {
@@ -391,7 +530,9 @@ export default function SupersetPluginChartHelloWorld(
 
     const modelUrl = sceneData?.modelUrl;
     if (!modelUrl) {
-      frameCamera();
+      setModelWorldSize(null);
+      setModelInfo(null);
+      frameCameraRef.current();
       return undefined;
     }
 
@@ -411,14 +552,21 @@ export default function SupersetPluginChartHelloWorld(
         }
         modelGroupRef.current = group;
         scene.add(group);
-        frameCamera();
+        frameCameraRef.current();
 
         const modelBox = new THREE.Box3().setFromObject(group);
         const modelSize = modelBox.getSize(new THREE.Vector3());
         const modelCenter = modelBox.getCenter(new THREE.Vector3());
+        const maxDim = Math.max(modelSize.x, modelSize.y, modelSize.z);
+        if (maxDim > 0) {
+          // Drives marker/label default scale here, and the marker-size
+          // slider bounds over in the control panel.
+          setModelWorldSize(maxDim);
+          setModelInfo({ maxDim });
+        }
         // eslint-disable-next-line no-console
         console.info(
-          '[3D Device Viewer] model bounding box  size (x,y,z):',
+          '[3D Device Viewer] model bounding box — size (x,y,z):',
           modelSize.x.toFixed(3),
           modelSize.y.toFixed(3),
           modelSize.z.toFixed(3),
@@ -434,9 +582,11 @@ export default function SupersetPluginChartHelloWorld(
         // eslint-disable-next-line no-console
         console.error('Failed to load GLB model', err);
         setModelError(
-          'Failed to load the model at modelUrl  this is almost always CORS (the host must send Access-Control-Allow-Origin) or an unreachable/wrong URL, not a code bug. Sharing links (SharePoint/OneDrive/Google Drive "share" URLs) will not work here. Device markers will still render.',
+          'Failed to load the model at modelUrl — this is almost always CORS (the host must send Access-Control-Allow-Origin) or an unreachable/wrong URL, not a code bug. Sharing links (SharePoint/OneDrive/Google Drive "share" URLs) will not work here. Device markers will still render.',
         );
-        frameCamera();
+        setModelWorldSize(null);
+        setModelInfo(null);
+        frameCameraRef.current();
       },
     );
 
@@ -446,10 +596,11 @@ export default function SupersetPluginChartHelloWorld(
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [sceneData?.modelUrl, sceneData?.modelScale, JSON.stringify(sceneData?.modelOffset)]);
 
-  // Rebuild device markers whenever the *working* device list changes 
-  // i.e. live edits from the click-to-place workflow, not just the
-  // original uploaded JSON. Independent of the model load, so editing
-  // positions doesn't refetch the GLB.
+  // Rebuild device markers whenever a marker's position, colour or size
+  // changes in the scene JSON (i.e. on every edit made in the control
+  // panel's sensor editor), or when the model's measured size changes the
+  // defaults. Independent of the model load, so editing a sensor never
+  // refetches the GLB.
   useEffect(() => {
     const scene = sceneRef.current;
     if (!scene) return;
@@ -461,44 +612,37 @@ export default function SupersetPluginChartHelloWorld(
     }
     markerMeshesRef.current = [];
 
-    if (workingDevices.length === 0) return;
+    if (devices.length === 0) return;
 
     const newMarkers: THREE.Mesh[] = [];
-    const group = buildDeviceGroup(workingDevices, newMarkers);
+    const group = buildDeviceGroup(
+      devices,
+      newMarkers,
+      modelWorldSize ?? FALLBACK_WORLD_SIZE,
+      showLabels,
+    );
     deviceGroupRef.current = group;
     markerMeshesRef.current = newMarkers;
     scene.add(group);
 
+    // Keep the open detail panel in sync with the rebuilt (edited) device.
+    setSelectedDevice(prev =>
+      prev ? devices.find(d => d.deviceId === prev.deviceId) || null : null,
+    );
+
     // Only auto-frame off devices if there's no model to frame against;
     // the model-load effect already frames the camera when a model exists.
     if (!sceneData?.modelUrl) {
-      frameCamera();
+      frameCameraRef.current();
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [workingDevices]);
+  }, [deviceSignature, modelWorldSize, showLabels]);
 
-  // Show/update/remove the pending-position preview marker as the user
-  // clicks around while placing a device.
+  // Re-frame when the zoom control changes.
   useEffect(() => {
-    const scene = sceneRef.current;
-    if (!scene) return undefined;
-
-    if (pendingMarkerRef.current) {
-      scene.remove(pendingMarkerRef.current);
-      disposeObject3D(pendingMarkerRef.current);
-      pendingMarkerRef.current = null;
-    }
-
-    if (pendingPosition) {
-      const activeDevice = workingDevices.find(d => d.deviceId === pickerDeviceId);
-      const marker = makePendingMarker((activeDevice?.markerSize || 0.03) * 1.4);
-      marker.position.set(pendingPosition[0], pendingPosition[1], pendingPosition[2]);
-      pendingMarkerRef.current = marker;
-      scene.add(marker);
-    }
-    return undefined;
+    frameCameraRef.current();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [pendingPosition]);
+  }, [cameraZoom]);
 
   // Resize the renderer/camera in place on chart resize.
   useEffect(() => {
@@ -512,41 +656,9 @@ export default function SupersetPluginChartHelloWorld(
     camera.updateProjectionMatrix();
   }, [width, height]);
 
-  function confirmPendingPosition() {
-    if (!pendingPosition || !pickerDeviceId) return;
-    setWorkingDevices(prev =>
-      prev.map(d =>
-        d.deviceId === pickerDeviceId ? { ...d, position: pendingPosition } : d,
-      ),
-    );
-    setPendingPosition(null);
-    setPickModeOn(false);
-  }
-
-  function cancelPendingPosition() {
-    setPendingPosition(null);
-  }
-
-  function copyDevicesJson() {
-    const payload = {
-      modelUrl: sceneData?.modelUrl,
-      resourceId: sceneData?.resourceId,
-      resourceName: sceneData?.resourceName,
-      devices: workingDevices,
-      exportedAt: new Date().toISOString(),
-    };
-    navigator.clipboard
-      .writeText(JSON.stringify(payload, null, 2))
-      .then(() => {
-        setCopyFeedback('Copied!');
-        setTimeout(() => setCopyFeedback(''), 2000);
-      })
-      .catch(() => setCopyFeedback('Copy failed  check clipboard permissions.'));
-  }
-
   const detailRows = selectedDevice ? Object.entries(selectedDevice) : [];
-  const activePickerDevice = pickerDeviceId
-    ? workingDevices.find(d => d.deviceId === pickerDeviceId) || null
+  const pickTargetDevice = pickTargetId
+    ? devices.find(d => d.deviceId === pickTargetId) || null
     : null;
 
   return (
@@ -594,7 +706,39 @@ export default function SupersetPluginChartHelloWorld(
             padding: '24px',
           }}
         >
-          Upload a Device Scene JSON file in the Customize panel.
+          Upload a Sensor Scene JSON file in the Customize panel.
+        </div>
+      )}
+
+      {/* Pick mode is driven from the sensor editor in the control panel;
+          this is the only thing that overlays the canvas while it's on. */}
+      {pickTargetId && (
+        <div
+          style={{
+            position: 'absolute',
+            top: 12,
+            left: '50%',
+            transform: 'translateX(-50%)',
+            zIndex: 4,
+            background: 'rgba(37, 99, 235, 0.95)',
+            color: 'white',
+            fontSize: 12,
+            fontWeight: 600,
+            padding: '7px 14px',
+            borderRadius: 999,
+            boxShadow: '0 4px 16px rgba(15,23,42,0.25)',
+            pointerEvents: 'none',
+            whiteSpace: 'nowrap',
+            maxWidth: 'calc(100% - 32px)',
+            overflow: 'hidden',
+            textOverflow: 'ellipsis',
+          }}
+        >
+          {modelWorldSize !== null
+            ? `Click the model to place ${
+                pickTargetDevice?.deviceName || pickTargetId
+              } — Esc to cancel`
+            : 'Load a model (modelUrl) before picking a position'}
         </div>
       )}
 
@@ -614,179 +758,6 @@ export default function SupersetPluginChartHelloWorld(
           }}
         >
           {error || modelError}
-        </div>
-      )}
-
-      {workingDevices.length > 0 && (
-        <div
-          style={{
-            position: 'absolute',
-            top: 56,
-            left: 16,
-            zIndex: 3,
-            width: 220,
-            maxHeight: 'calc(100% - 80px)',
-            overflowY: 'auto',
-            background: 'rgba(255,255,255,0.97)',
-            border: '1px solid #e2e8f0',
-            borderRadius: '10px',
-            boxShadow: '0 4px 16px rgba(15,23,42,0.15)',
-            padding: '12px 14px',
-            fontSize: '12px',
-            color: '#0f172a',
-          }}
-        >
-          <div style={{ fontWeight: 700, fontSize: 13, marginBottom: 8 }}>
-            Devices
-          </div>
-
-          {workingDevices.map(device => {
-            const active = device.deviceId === pickerDeviceId;
-            return (
-              <div
-                key={device.deviceId}
-                onClick={() => {
-                  setPickerDeviceId(device.deviceId);
-                  setPendingPosition(null);
-                  setPickModeOn(false);
-                }}
-                style={{
-                  padding: '6px 8px',
-                  borderRadius: 6,
-                  marginBottom: 4,
-                  cursor: 'pointer',
-                  background: active ? '#eff6ff' : 'transparent',
-                  border: active ? '1px solid #93c5fd' : '1px solid transparent',
-                  display: 'flex',
-                  alignItems: 'center',
-                  gap: 6,
-                }}
-              >
-                <span
-                  style={{
-                    width: 8,
-                    height: 8,
-                    borderRadius: '50%',
-                    background: device.markerColor || '#2563eb',
-                    flexShrink: 0,
-                  }}
-                />
-                <span
-                  style={{
-                    overflow: 'hidden',
-                    textOverflow: 'ellipsis',
-                    whiteSpace: 'nowrap',
-                  }}
-                >
-                  {device.deviceName || device.deviceId}
-                </span>
-                {device.position && (
-                  <span style={{ marginLeft: 'auto', color: '#16a34a', fontSize: 10 }}>
-                    �
-                  </span>
-                )}
-              </div>
-            );
-          })}
-
-          {activePickerDevice && (
-            <div style={{ marginTop: 10, paddingTop: 10, borderTop: '1px solid #e2e8f0' }}>
-              <div style={{ fontWeight: 600, marginBottom: 6 }}>
-                {activePickerDevice.deviceName || activePickerDevice.deviceId}
-              </div>
-
-              {activePickerDevice.position && !pendingPosition && (
-                <div style={{ fontSize: 11, color: '#64748b', marginBottom: 8 }}>
-                  Current: {activePickerDevice.position.map(n => n.toFixed(3)).join(', ')}
-                </div>
-              )}
-
-              {pendingPosition ? (
-                <>
-                  <div style={{ fontSize: 11, color: '#b45309', marginBottom: 8 }}>
-                    New: {pendingPosition.map(n => n.toFixed(3)).join(', ')}
-                  </div>
-                  <button
-                    type="button"
-                    onClick={confirmPendingPosition}
-                    style={{
-                      width: '100%',
-                      padding: '6px 8px',
-                      borderRadius: 6,
-                      border: 'none',
-                      cursor: 'pointer',
-                      fontWeight: 600,
-                      color: 'white',
-                      background: '#16a34a',
-                      marginBottom: 6,
-                    }}
-                  >
-                    Confirm Position
-                  </button>
-                  <button
-                    type="button"
-                    onClick={cancelPendingPosition}
-                    style={{
-                      width: '100%',
-                      padding: '6px 8px',
-                      borderRadius: 6,
-                      border: '1px solid #cbd5e1',
-                      cursor: 'pointer',
-                      fontWeight: 600,
-                      color: '#334155',
-                      background: 'white',
-                    }}
-                  >
-                    Cancel
-                  </button>
-                </>
-              ) : (
-                <button
-                  type="button"
-                  onClick={() => setPickModeOn(v => !v)}
-                  style={{
-                    width: '100%',
-                    padding: '6px 8px',
-                    borderRadius: 6,
-                    border: 'none',
-                    cursor: 'pointer',
-                    fontWeight: 600,
-                    color: 'white',
-                    background: pickModeOn ? '#dc2626' : '#2563eb',
-                  }}
-                >
-                  {pickModeOn
-                    ? 'Click on the model&'
-                    : activePickerDevice.position
-                      ? 'Update Position'
-                      : 'Set Position'}
-                </button>
-              )}
-            </div>
-          )}
-
-          <button
-            type="button"
-            onClick={copyDevicesJson}
-            style={{
-              width: '100%',
-              marginTop: 12,
-              padding: '6px 8px',
-              borderRadius: 6,
-              border: '1px solid #cbd5e1',
-              cursor: 'pointer',
-              fontWeight: 600,
-              color: '#334155',
-              background: 'white',
-            }}
-          >
-            Copy Devices JSON
-          </button>
-          {copyFeedback && (
-            <div style={{ fontSize: 11, color: '#16a34a', marginTop: 4, textAlign: 'center' }}>
-              {copyFeedback}
-            </div>
-          )}
         </div>
       )}
 
@@ -833,7 +804,7 @@ export default function SupersetPluginChartHelloWorld(
               }}
               aria-label="Close"
             >
-              �
+              ×
             </button>
           </div>
           {detailRows.map(([key, val]) => (
@@ -843,12 +814,35 @@ export default function SupersetPluginChartHelloWorld(
               </div>
               <div style={{ wordBreak: 'break-word' }}>
                 {key === 'position' && Array.isArray(val)
-                  ? (val as number[]).map(n => n.toFixed(3)).join(', ')
+                  ? (val as number[]).map(n => Number(n).toFixed(3)).join(', ')
                   : String(val)}
               </div>
             </div>
           ))}
         </div>
+      )}
+
+      {sceneDataJson && (
+        <button
+          type="button"
+          onClick={() => frameCameraRef.current()}
+          style={{
+            position: 'absolute',
+            bottom: 12,
+            right: 16,
+            zIndex: 3,
+            padding: '5px 10px',
+            fontSize: 11,
+            fontWeight: 600,
+            color: '#334155',
+            background: 'rgba(255,255,255,0.9)',
+            border: '1px solid #cbd5e1',
+            borderRadius: 6,
+            cursor: 'pointer',
+          }}
+        >
+          Reset view
+        </button>
       )}
 
       <div ref={containerRef} style={{ width: '100%', height: '100%' }} />
