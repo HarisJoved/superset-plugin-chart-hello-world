@@ -23,6 +23,25 @@ import SensorSceneControl from './controls/SensorSceneControl';
 // Safe translation wrapper avoiding TranslatorSingleton crashes on module load
 const t = typeof coreT === 'function' ? coreT : (str: string) => str;
 
+interface DatasourceLike {
+  columns?: { column_name?: string; verbose_name?: string | null }[];
+}
+
+/**
+ * `[value, label]` pairs for every column on the selected dataset. Written
+ * out locally rather than imported from chart-controls so the plugin doesn't
+ * depend on which helpers a given Superset version happens to export.
+ */
+function columnChoices(state: unknown): [string, string][] {
+  const datasource = (state as { datasource?: DatasourceLike } | undefined)
+    ?.datasource;
+  return (datasource?.columns || [])
+    .map(column => column.column_name)
+    .filter((name): name is string => Boolean(name))
+    .sort((a, b) => a.localeCompare(b))
+    .map(name => [name, name]);
+}
+
 /**
  * Every section below uses `tabOverride: 'customize'`, which moves it out
  * of Superset's default "Data" tab and into "Customize" instead. We don't
@@ -32,6 +51,76 @@ const t = typeof coreT === 'function' ? coreT : (str: string) => str;
  */
 const config: ControlPanelConfig = {
   controlPanelSections: [
+    // The only section without `tabOverride`, so this is what fills the Data
+    // tab. It's only used when sensors come from the dataset rather than an
+    // uploaded file; buildQuery falls back to a no-op query when no id
+    // column is picked, so leaving it blank costs nothing.
+    {
+      label: t('Sensor Data'),
+      expanded: true,
+      description: t(
+        'Map dataset columns to sensors — one row per sensor. Positions are not read from the dataset; you place each sensor on the model yourself under Customize, and the placements are saved with the chart.',
+      ),
+      controlSetRows: [
+        [
+          {
+            name: 'sensor_id_column',
+            config: {
+              type: 'SelectControl',
+              label: t('Sensor ID Column'),
+              description: t(
+                'Column uniquely identifying each sensor (e.g. Device_ID). Placements are keyed on this value, so changing it re-keys every placement.',
+              ),
+              default: null,
+              freeForm: false,
+              clearable: true,
+              mapStateToProps: (state: unknown) => ({
+                choices: columnChoices(state),
+              }),
+            },
+          },
+        ],
+        [
+          {
+            name: 'sensor_name_column',
+            config: {
+              type: 'SelectControl',
+              label: t('Sensor Label Column'),
+              description: t(
+                'Column used for the marker label and the editor list (e.g. Full_Device_Name). Falls back to the ID column.',
+              ),
+              default: null,
+              freeForm: false,
+              clearable: true,
+              mapStateToProps: (state: unknown) => ({
+                choices: columnChoices(state),
+              }),
+            },
+          },
+        ],
+        [
+          {
+            name: 'sensor_extra_columns',
+            config: {
+              type: 'SelectControl',
+              multi: true,
+              label: t('Extra Columns'),
+              description: t(
+                'Additional columns to fetch and show in the popup when a marker is clicked (e.g. Model_Name).',
+              ),
+              default: [],
+              freeForm: false,
+              clearable: true,
+              mapStateToProps: (state: unknown) => ({
+                choices: columnChoices(state),
+              }),
+            },
+          },
+        ],
+        ['adhoc_filters'],
+        ['row_limit'],
+      ],
+    },
     {
       label: t('Sensor Scene'),
       expanded: true,
@@ -39,13 +128,46 @@ const config: ControlPanelConfig = {
       controlSetRows: [
         [
           {
+            name: 'sensor_source',
+            config: {
+              type: 'SelectControl',
+              label: t('Sensor Source'),
+              default: 'json',
+              renderTrigger: true,
+              clearable: false,
+              choices: [
+                ['json', t('Uploaded JSON file')],
+                ['dataset', t('Dataset rows')],
+              ],
+              description: t(
+                'Where the list of sensors comes from. "Uploaded JSON file" reads devices and their positions from the file below. "Dataset rows" builds one sensor per row of the dataset using the columns mapped in the Data tab — positions are not read from the dataset, you place each sensor yourself and the placements are saved with the chart.',
+              ),
+            },
+          },
+        ],
+        [
+          {
+            name: 'model_url',
+            config: {
+              type: 'TextControl',
+              default: '',
+              renderTrigger: true,
+              label: t('3D Model URL'),
+              description: t(
+                'URL of a hosted .glb/.gltf file. Overrides "modelUrl" from an uploaded JSON file, and is the only way to set the model when sensors come from a dataset. The host must send CORS headers (Access-Control-Allow-Origin); sharing links from SharePoint/OneDrive/Google Drive will not work.',
+              ),
+            },
+          },
+        ],
+        [
+          {
             name: 'scene_data_json',
             config: {
               type: SensorSceneControl,
               renderTrigger: true,
-              label: t('Sensor Scene JSON'),
+              label: t('Sensors'),
               description: t(
-                'Upload a .json file with a top-level "devices" array, and optionally a "modelUrl" pointing to a hosted .glb file. Each device needs a deviceId, a position [x,y,z], and optionally deviceName, modelName, markerColor, and markerSize. Once loaded, expand a sensor below to change its colour, size, and position.',
+                'Optionally upload a .json file with a top-level "devices" array (each needing a deviceId and a position [x,y,z]). Whichever source the sensors come from, the list below is where you place them on the model and set their colour and size — those edits are stored here and saved with the chart.',
               ),
               default: '',
             },

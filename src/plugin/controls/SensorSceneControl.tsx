@@ -17,10 +17,11 @@
  * under the License.
  */
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { DeviceDatum, SceneData } from '../../types';
+import { DeviceDatum, SceneData, isPlaced } from '../../types';
 import {
   Position3,
   getModelInfo,
+  getSensorRoster,
   setPickTarget,
   subscribePick,
   subscribeState,
@@ -125,6 +126,12 @@ export default function SensorSceneControl({
   const [pickingId, setPickingId] = useState<string | null>(null);
   const [modelMaxDim, setModelMaxDim] = useState<number | null>(null);
   const [copyFeedback, setCopyFeedback] = useState<string>('');
+  // Sensors the viewer found in its dataset query, published over the bridge.
+  // Empty when the scene comes from an uploaded file.
+  const [roster, setRoster] = useState(() => getSensorRoster());
+  // Read inside callbacks that must not be re-created when the roster changes.
+  const rosterRef = useRef(roster);
+  rosterRef.current = roster;
 
   // JSON text we most recently pushed up through onChange. Used to tell our
   // own edits apart from a genuinely new value arriving from outside, so
@@ -161,9 +168,13 @@ export default function SensorSceneControl({
     }
   }, [value]);
 
-  // Mirror the model size the viewer measured, for the size slider bounds.
+  // Mirror what the viewer publishes: the model size (for the size slider
+  // bounds) and the dataset sensor roster.
   useEffect(() => {
-    const sync = () => setModelMaxDim(getModelInfo()?.maxDim ?? null);
+    const sync = () => {
+      setModelMaxDim(getModelInfo()?.maxDim ?? null);
+      setRoster(getSensorRoster());
+    };
     sync();
     return subscribeState(sync);
   }, []);
@@ -210,15 +221,33 @@ export default function SensorSceneControl({
     [commit],
   );
 
+  /**
+   * Upsert, not update: a sensor that came from a dataset row has no entry in
+   * the devices array until it's first placed, and when nothing has been
+   * uploaded there's no scene object either. Both get created on demand, which
+   * is how dataset placements end up saved with the chart.
+   */
   const updateDevice = useCallback(
     (deviceId: string, patch: Partial<DeviceDatum>) => {
-      const current = sceneRef.current;
-      if (!current) return;
+      const current: SceneData = sceneRef.current ?? { devices: [] };
+      const existing = current.devices.find(d => d.deviceId === deviceId);
       applyScene({
         ...current,
-        devices: current.devices.map(d =>
-          d.deviceId === deviceId ? { ...d, ...patch } : d,
-        ),
+        devices: existing
+          ? current.devices.map(d =>
+              d.deviceId === deviceId ? { ...d, ...patch } : d,
+            )
+          : [
+              ...current.devices,
+              {
+                deviceId,
+                // Carry the label across so the exported JSON is readable
+                // without the dataset alongside it.
+                deviceName: rosterRef.current.find(r => r.deviceId === deviceId)
+                  ?.deviceName,
+                ...patch,
+              },
+            ],
       });
     },
     [applyScene],
@@ -267,7 +296,21 @@ export default function SensorSceneControl({
   );
 
   const bounds = useMemo(() => sizeBounds(modelMaxDim), [modelMaxDim]);
-  const devices = scene?.devices ?? [];
+  const storedDevices = scene?.devices ?? [];
+  const fromDataset = roster.length > 0;
+  /**
+   * The list to edit. In dataset mode the roster is authoritative about which
+   * sensors exist (so sensors that have never been placed still show up), with
+   * any stored placement merged in. Otherwise the uploaded file's devices are
+   * the whole list.
+   */
+  const devices: DeviceDatum[] = fromDataset
+    ? roster.map(entry => ({
+        ...(storedDevices.find(d => d.deviceId === entry.deviceId) || {}),
+        deviceId: entry.deviceId,
+        deviceName: entry.deviceName,
+      }))
+    : storedDevices;
 
   function togglePick(deviceId: string) {
     if (pickingId === deviceId) {
@@ -280,22 +323,46 @@ export default function SensorSceneControl({
   }
 
   function applyToAll(source: DeviceDatum) {
-    const current = sceneRef.current;
-    if (!current) return;
-    applyScene({
-      ...current,
-      devices: current.devices.map(d => ({
-        ...d,
-        markerColor: toHexColor(source.markerColor),
-        markerSize: source.markerSize ?? bounds.fallback,
-      })),
+    const current: SceneData = sceneRef.current ?? { devices: [] };
+    const markerColor = toHexColor(source.markerColor);
+    const markerSize = source.markerSize ?? bounds.fallback;
+    // Keyed by id so this upserts across the visible list — in dataset mode
+    // most of those sensors may not be in the stored array yet.
+    const byId = new Map<string, DeviceDatum>(
+      current.devices.map(d => [d.deviceId, d] as [string, DeviceDatum]),
+    );
+    devices.forEach(row => {
+      byId.set(row.deviceId, {
+        ...(byId.get(row.deviceId) ?? {
+          deviceId: row.deviceId,
+          deviceName: row.deviceName,
+        }),
+        markerColor,
+        markerSize,
+      });
     });
+    applyScene({ ...current, devices: Array.from(byId.values()) });
+  }
+
+  function clearPlacement(deviceId: string) {
+    // `undefined` rather than a delete: JSON.stringify drops the key, so the
+    // sensor goes back to being unplaced.
+    updateDevice(deviceId, { position: undefined });
+    if (pickingId === deviceId) {
+      setPickingId(null);
+      setPickTarget(null);
+    }
   }
 
   function copyJson() {
-    if (!scene) return;
+    // In dataset mode, export the merged view — roster names plus placements —
+    // so the result is a portable scene file that works in JSON mode too. In
+    // file mode, export exactly what's stored so the round-trip is lossless.
+    const payload: SceneData = fromDataset
+      ? { ...(scene ?? { devices: [] }), devices: devices.filter(isPlaced) }
+      : (scene ?? { devices: [] });
     navigator.clipboard
-      .writeText(JSON.stringify(scene, null, 2))
+      .writeText(JSON.stringify(payload, null, 2))
       .then(() => {
         setCopyFeedback('Copied!');
         window.setTimeout(() => setCopyFeedback(''), 2000);
@@ -328,7 +395,7 @@ export default function SensorSceneControl({
           Loaded {fileName}
         </div>
       )}
-      {!fileName && value && (
+      {!fileName && value && !fromDataset && (
         <div style={{ fontSize: 12, color: '#64748b', marginTop: 4 }}>
           Existing scene data loaded ({value.length} chars). Choose a file to
           replace it.
@@ -337,6 +404,14 @@ export default function SensorSceneControl({
       {error && (
         <div style={{ fontSize: 12, color: '#dc2626', marginTop: 4 }}>
           {error}
+        </div>
+      )}
+
+      {devices.length === 0 && (
+        <div style={{ fontSize: 11, color: '#8e94a1', marginTop: 8 }}>
+          No sensors yet. Either upload a scene file above, or set Sensor Source
+          to &ldquo;Dataset rows&rdquo; and map a Sensor ID Column in the Data
+          tab — the sensors will then be listed here to place on the model.
         </div>
       )}
 
@@ -354,13 +429,20 @@ export default function SensorSceneControl({
           >
             Sensors
             <span style={{ color: '#8e94a1', fontWeight: 400 }}>
-              ({devices.length})
+              ({devices.filter(isPlaced).length}/{devices.length} placed)
             </span>
+          </div>
+
+          <div style={{ fontSize: 11, color: '#8e94a1', marginBottom: 6 }}>
+            {fromDataset
+              ? 'From the dataset. Placements are saved with the chart, keyed by sensor ID.'
+              : 'From the uploaded file.'}
           </div>
 
           {devices.map(device => {
             const expanded = device.deviceId === expandedId;
             const picking = device.deviceId === pickingId;
+            const placed = isPlaced(device);
             const color = toHexColor(device.markerColor);
             const size = device.markerSize ?? bounds.fallback;
             const position: Position3 = (device.position || [0, 0, 0]) as Position3;
@@ -400,8 +482,10 @@ export default function SensorSceneControl({
                       width: 10,
                       height: 10,
                       borderRadius: '50%',
-                      background: color,
-                      border: '1px solid rgba(15,23,42,0.2)',
+                      background: placed ? color : 'transparent',
+                      border: placed
+                        ? '1px solid rgba(15,23,42,0.2)'
+                        : '1px dashed #b0b6c3',
                       flexShrink: 0,
                     }}
                   />
@@ -411,10 +495,25 @@ export default function SensorSceneControl({
                       textOverflow: 'ellipsis',
                       whiteSpace: 'nowrap',
                       flex: 1,
+                      color: placed ? '#323b48' : '#8e94a1',
                     }}
                   >
                     {device.deviceName || device.deviceId}
                   </span>
+                  {!placed && (
+                    <span
+                      style={{
+                        fontSize: 10,
+                        color: '#8e94a1',
+                        border: '1px solid #e2e8f0',
+                        borderRadius: 3,
+                        padding: '0 4px',
+                        flexShrink: 0,
+                      }}
+                    >
+                      unplaced
+                    </span>
+                  )}
                   <span style={{ color: '#8e94a1', fontSize: 10 }}>
                     {expanded ? '▲' : '▼'}
                   </span>
@@ -523,7 +622,9 @@ export default function SensorSceneControl({
                     >
                       {picking
                         ? 'Click the model in the viewer… (cancel)'
-                        : 'Pick position on model'}
+                        : placed
+                          ? 'Re-pick position on model'
+                          : 'Pick position on model'}
                     </button>
 
                     <button
@@ -533,6 +634,16 @@ export default function SensorSceneControl({
                     >
                       Apply this colour &amp; size to all sensors
                     </button>
+
+                    {placed && (
+                      <button
+                        type="button"
+                        onClick={() => clearPlacement(device.deviceId)}
+                        style={{ ...buttonStyle, marginTop: 6, color: '#b91c1c' }}
+                      >
+                        Remove from model
+                      </button>
+                    )}
                   </div>
                 )}
               </div>

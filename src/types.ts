@@ -31,16 +31,35 @@ export interface SupersetPluginChartHelloWorldStylesProps {
  * Extra fields (anything beyond what's listed) are preserved and shown
  * in the click info panel, since upstream exports may carry additional
  * metadata we don't need to know about in advance.
+ *
+ * Only `deviceId` is required: a sensor sourced from a dataset row exists
+ * before anyone has placed it, so it has no position (and no colour or size)
+ * until the user picks one on the model.
  */
 export interface DeviceDatum {
-  modelId: string;
-  modelName: string;
   deviceId: string;
-  deviceName: string;
-  position: [number, number, number];
+  modelId?: string;
+  modelName?: string;
+  deviceName?: string;
+  position?: [number, number, number];
   markerColor?: string;
   markerSize?: number;
   [key: string]: unknown;
+}
+
+/**
+ * Whether a device has a usable position. Shared by the viewer (which only
+ * draws placed sensors) and the editor (which badges the unplaced ones), and
+ * strict about the contents because positions can arrive from a hand-edited
+ * JSON file.
+ */
+export function isPlaced(device: DeviceDatum): boolean {
+  const { position } = device;
+  return (
+    Array.isArray(position) &&
+    position.length === 3 &&
+    position.every(n => typeof n === 'number' && Number.isFinite(n))
+  );
 }
 
 export interface SceneData {
@@ -55,6 +74,12 @@ export interface SceneData {
   modelOffset?: [number, number, number];
 }
 
+/** Where the list of sensors comes from. */
+export type SensorSource = 'json' | 'dataset';
+
+/** One row of the sensor dataset, as returned by the chart data API. */
+export type SensorRow = Record<string, unknown>;
+
 interface SupersetPluginChartHelloWorldCustomizeProps {
   headerText: string;
   sceneDataJson: string;
@@ -63,6 +88,22 @@ interface SupersetPluginChartHelloWorldCustomizeProps {
   cameraZoom?: number;
   /** Whether to draw the billboard name label next to each marker. */
   showLabels?: boolean;
+  sensorSource?: SensorSource;
+  /** Overrides `modelUrl` from the uploaded JSON when set. */
+  modelUrl?: string;
+}
+
+/**
+ * Dataset-mode inputs. The dataset supplies the sensor *roster* only —
+ * there are no coordinate columns, so positions (plus colour and size) are
+ * placed by hand and stored in `sceneDataJson`'s devices array, keyed by the
+ * value of `sensorIdColumn`.
+ */
+interface SupersetPluginChartHelloWorldDataProps {
+  data: SensorRow[];
+  sensorIdColumn?: string;
+  sensorNameColumn?: string;
+  sensorExtraColumns?: string[];
 }
 
 export type SupersetPluginChartHelloWorldQueryFormData = QueryFormData &
@@ -71,4 +112,5 @@ export type SupersetPluginChartHelloWorldQueryFormData = QueryFormData &
 
 export type SupersetPluginChartHelloWorldProps =
   SupersetPluginChartHelloWorldStylesProps &
-    SupersetPluginChartHelloWorldCustomizeProps;
+    SupersetPluginChartHelloWorldCustomizeProps &
+    SupersetPluginChartHelloWorldDataProps;

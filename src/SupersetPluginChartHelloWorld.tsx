@@ -24,13 +24,20 @@ import { RoomEnvironment } from 'three/examples/jsm/environments/RoomEnvironment
 import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
 // eslint-disable-next-line import/extensions
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
-import { DeviceDatum, SceneData, SupersetPluginChartHelloWorldProps } from './types';
+import {
+  DeviceDatum,
+  SceneData,
+  SensorSource,
+  SupersetPluginChartHelloWorldProps,
+  isPlaced,
+} from './types';
 import {
   Position3,
   emitPick,
   getPickTarget,
   setModelInfo,
   setPickTarget,
+  setSensorRoster,
   subscribeState,
 } from './sensorEditorBridge';
 
@@ -180,6 +187,12 @@ export default function SupersetPluginChartHelloWorld(
     backgroundColor,
     cameraZoom = 1,
     showLabels = true,
+    sensorSource,
+    modelUrl: modelUrlOverride = '',
+    data = [],
+    sensorIdColumn,
+    sensorNameColumn,
+    sensorExtraColumns = [],
   } = props;
 
   const containerRef = useRef<HTMLDivElement>(null);
@@ -232,13 +245,105 @@ export default function SupersetPluginChartHelloWorld(
     }
   }, [sceneDataJson]);
 
-  const devices = sceneData?.devices ?? [];
+  /** Devices as stored in the scene JSON. In dataset mode this is purely the
+   * placement store — positions, colours and sizes keyed by device id — and
+   * the roster itself comes from the query. */
+  const storedDevices = useMemo<DeviceDatum[]>(
+    () => sceneData?.devices ?? [],
+    [sceneData],
+  );
+
+  // Deliberately keyed off the explicit control and nothing else. Inferring
+  // the mode from "is there any scene JSON?" is unstable, because dataset
+  // placements are stored in that same field — the first placement would flip
+  // the chart into file mode. buildQuery keys off the same control.
+  const effectiveSource: SensorSource =
+    sensorSource === 'dataset' ? 'dataset' : 'json';
+
+  // The model URL control wins over the uploaded file's `modelUrl`, and is the
+  // only source of a model in dataset mode.
+  const resolvedModelUrl = modelUrlOverride || sceneData?.modelUrl || '';
+
+  // Joined by value, not reference: transformProps rebuilds this array each
+  // render, which would otherwise invalidate the memo below every time.
+  const extraColumnsKey = sensorExtraColumns.join(',');
+
+  /** One sensor per dataset row, joined to its stored placement by id. */
+  const datasetDevices = useMemo<DeviceDatum[]>(() => {
+    if (effectiveSource !== 'dataset' || !sensorIdColumn) return [];
+    const placements = new Map<string, DeviceDatum>(
+      storedDevices.map(d => [d.deviceId, d] as [string, DeviceDatum]),
+    );
+    const extras = extraColumnsKey ? extraColumnsKey.split(',') : [];
+    const seen = new Set<string>();
+    const out: DeviceDatum[] = [];
+    data.forEach(row => {
+      const rawId = row[sensorIdColumn];
+      if (rawId === null || rawId === undefined || rawId === '') return;
+      const deviceId = String(rawId);
+      // A dataset may legitimately repeat an id (e.g. one row per reading);
+      // one marker per sensor is the only thing that makes sense here.
+      if (seen.has(deviceId)) return;
+      seen.add(deviceId);
+      const stored = placements.get(deviceId);
+      const extraFields: Record<string, unknown> = {};
+      extras.forEach(column => {
+        if (column in row) extraFields[column] = row[column];
+      });
+      const label = sensorNameColumn ? row[sensorNameColumn] : undefined;
+      out.push({
+        ...extraFields,
+        deviceId,
+        deviceName:
+          label === null || label === undefined ? deviceId : String(label),
+        position: stored?.position,
+        markerColor: stored?.markerColor,
+        markerSize: stored?.markerSize,
+      });
+    });
+    return out;
+  }, [
+    effectiveSource,
+    sensorIdColumn,
+    sensorNameColumn,
+    extraColumnsKey,
+    data,
+    storedDevices,
+  ]);
+
+  const devices = effectiveSource === 'dataset' ? datasetDevices : storedDevices;
+  // Only placed sensors get a marker — dataset sensors start out with no
+  // position and would otherwise all pile up at the origin.
+  const placedDevices = devices.filter(isPlaced);
   // Serialised marker inputs — lets the marker-rebuild effect fire on colour
   // / size / position edits from the control panel without also refetching
   // the GLB every time an unrelated part of the scene JSON changes.
   const deviceSignature = JSON.stringify(
-    devices.map(d => [d.deviceId, d.deviceName, d.position, d.markerColor, d.markerSize]),
+    placedDevices.map(d => [
+      d.deviceId,
+      d.deviceName,
+      d.position,
+      d.markerColor,
+      d.markerSize,
+    ]),
   );
+
+  // Publish the dataset roster so the sensor editor in the control panel can
+  // list sensors it has no other way of seeing (control panels don't get
+  // query results). Unchanged rosters are dropped inside the bridge, so this
+  // can't loop.
+  useEffect(() => {
+    if (effectiveSource !== 'dataset') {
+      setSensorRoster([]);
+      return;
+    }
+    setSensorRoster(
+      datasetDevices.map(d => ({
+        deviceId: d.deviceId,
+        deviceName: String(d.deviceName || d.deviceId),
+      })),
+    );
+  }, [effectiveSource, datasetDevices]);
 
   // Mirror the control panel's pick request into local state.
   useEffect(() => {
@@ -528,7 +633,7 @@ export default function SupersetPluginChartHelloWorld(
       modelGroupRef.current = null;
     }
 
-    const modelUrl = sceneData?.modelUrl;
+    const modelUrl = resolvedModelUrl;
     if (!modelUrl) {
       setModelWorldSize(null);
       setModelInfo(null);
@@ -594,7 +699,7 @@ export default function SupersetPluginChartHelloWorld(
       cancelled = true;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [sceneData?.modelUrl, sceneData?.modelScale, JSON.stringify(sceneData?.modelOffset)]);
+  }, [resolvedModelUrl, sceneData?.modelScale, JSON.stringify(sceneData?.modelOffset)]);
 
   // Rebuild device markers whenever a marker's position, colour or size
   // changes in the scene JSON (i.e. on every edit made in the control
@@ -612,11 +717,11 @@ export default function SupersetPluginChartHelloWorld(
     }
     markerMeshesRef.current = [];
 
-    if (devices.length === 0) return;
+    if (placedDevices.length === 0) return;
 
     const newMarkers: THREE.Mesh[] = [];
     const group = buildDeviceGroup(
-      devices,
+      placedDevices,
       newMarkers,
       modelWorldSize ?? FALLBACK_WORLD_SIZE,
       showLabels,
@@ -627,12 +732,12 @@ export default function SupersetPluginChartHelloWorld(
 
     // Keep the open detail panel in sync with the rebuilt (edited) device.
     setSelectedDevice(prev =>
-      prev ? devices.find(d => d.deviceId === prev.deviceId) || null : null,
+      prev ? placedDevices.find(d => d.deviceId === prev.deviceId) || null : null,
     );
 
     // Only auto-frame off devices if there's no model to frame against;
     // the model-load effect already frames the camera when a model exists.
-    if (!sceneData?.modelUrl) {
+    if (!resolvedModelUrl) {
       frameCameraRef.current();
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -660,6 +765,28 @@ export default function SupersetPluginChartHelloWorld(
   const pickTargetDevice = pickTargetId
     ? devices.find(d => d.deviceId === pickTargetId) || null
     : null;
+
+  // Nothing to look at yet — say which knob is missing rather than showing an
+  // empty grey box.
+  let setupMessage = '';
+  if (!resolvedModelUrl && placedDevices.length === 0) {
+    setupMessage =
+      effectiveSource === 'dataset'
+        ? 'Enter a 3D Model URL in the Customize panel, then map a Sensor ID Column in the Data tab to place your sensors.'
+        : 'Enter a 3D Model URL and upload a Sensor Scene JSON file in the Customize panel — or set Sensor Source to "Dataset rows" to place sensors from this dataset instead.';
+  }
+  // The model is up but the sensors aren't on it yet. Non-blocking hint.
+  let placementHint = '';
+  if (!setupMessage && !error && !modelError) {
+    if (effectiveSource === 'dataset' && !sensorIdColumn) {
+      placementHint =
+        'Choose a Sensor ID Column in the Data tab to build sensors from this dataset.';
+    } else if (devices.length > 0 && placedDevices.length === 0) {
+      placementHint = `${devices.length} sensor${
+        devices.length === 1 ? '' : 's'
+      } loaded, none placed yet — use the Sensors list in the Customize panel.`;
+    }
+  }
 
   return (
     <div
@@ -692,7 +819,7 @@ export default function SupersetPluginChartHelloWorld(
         {headerText || '3D Device Viewer'}
       </div>
 
-      {!sceneDataJson && (
+      {setupMessage && (
         <div
           style={{
             position: 'absolute',
@@ -704,9 +831,31 @@ export default function SupersetPluginChartHelloWorld(
             fontSize: '14px',
             textAlign: 'center',
             padding: '24px',
+            maxWidth: 420,
+            margin: '0 auto',
+            lineHeight: 1.5,
           }}
         >
-          Upload a Sensor Scene JSON file in the Customize panel.
+          {setupMessage}
+        </div>
+      )}
+
+      {placementHint && (
+        <div
+          style={{
+            position: 'absolute',
+            bottom: 12,
+            left: 16,
+            right: 96,
+            zIndex: 2,
+            fontSize: '12px',
+            color: '#475569',
+            background: 'rgba(255,255,255,0.9)',
+            borderRadius: '6px',
+            padding: '6px 10px',
+          }}
+        >
+          {placementHint}
         </div>
       )}
 
@@ -822,7 +971,7 @@ export default function SupersetPluginChartHelloWorld(
         </div>
       )}
 
-      {sceneDataJson && (
+      {(resolvedModelUrl || placedDevices.length > 0) && (
         <button
           type="button"
           onClick={() => frameCameraRef.current()}

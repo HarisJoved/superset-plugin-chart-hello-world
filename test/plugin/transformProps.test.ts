@@ -50,7 +50,45 @@ describe('SupersetPluginChartHelloWorld transformProps', () => {
       backgroundColor: '#f8fafc',
       cameraZoom: 1,
       showLabels: true,
+      sensorSource: 'json',
+      modelUrl: '',
+      data: [],
+      sensorIdColumn: undefined,
+      sensorNameColumn: undefined,
+      sensorExtraColumns: [],
     });
+  });
+
+  it('passes dataset rows and the column mapping through', () => {
+    const rows = [
+      {
+        Device_ID: 'Aelita2S-001',
+        Model_Name: 'Coolon-Light',
+        Full_Device_Name: 'urn:ngsi-v2:Coolon-Light:Aelita2S-001',
+      },
+    ];
+    const props = transformProps(
+      new ChartProps({
+        formData: {
+          ...formData,
+          sensorSource: 'dataset',
+          modelUrl: '  https://example.com/tower.glb  ',
+          sensorIdColumn: 'Device_ID',
+          sensorNameColumn: 'Full_Device_Name',
+          sensorExtraColumns: ['Model_Name'],
+        },
+        width: 800,
+        height: 600,
+        theme: supersetTheme,
+        queriesData: [{ data: rows }],
+      }),
+    );
+    expect(props.sensorSource).toEqual('dataset');
+    expect(props.data).toEqual(rows);
+    expect(props.sensorIdColumn).toEqual('Device_ID');
+    expect(props.sensorExtraColumns).toEqual(['Model_Name']);
+    // Trimmed, so a stray copy-paste space can't break the GLB fetch.
+    expect(props.modelUrl).toEqual('https://example.com/tower.glb');
   });
 
   it('falls back to a plain fit when cameraZoom is blank or invalid', () => {

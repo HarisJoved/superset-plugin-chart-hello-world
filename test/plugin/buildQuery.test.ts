@@ -42,4 +42,60 @@ describe('SupersetPluginChartHelloWorld buildQuery', () => {
       },
     ]);
   });
+
+  describe('dataset mode', () => {
+    const datasetFormData = {
+      ...formData,
+      sensor_source: 'dataset',
+      sensor_id_column: 'Device_ID',
+      sensor_name_column: 'Full_Device_Name',
+      sensor_extra_columns: ['Model_Name'],
+    };
+
+    it('fetches the mapped columns as raw records', () => {
+      const [query] = buildQuery(datasetFormData).queries;
+      expect(query.columns).toEqual([
+        'Device_ID',
+        'Full_Device_Name',
+        'Model_Name',
+      ]);
+      // Empty metrics is what makes this a raw-records query rather than an
+      // aggregate with a GROUP BY.
+      expect(query.metrics).toEqual([]);
+    });
+
+    it('de-duplicates a column mapped to more than one role', () => {
+      const [query] = buildQuery({
+        ...datasetFormData,
+        sensor_name_column: 'Device_ID',
+        sensor_extra_columns: ['Device_ID', 'Model_Name'],
+      }).queries;
+      expect(query.columns).toEqual(['Device_ID', 'Model_Name']);
+    });
+
+    const isNoOpQuery = (query: { row_limit?: number; metrics?: unknown }) =>
+      query.row_limit === 1 &&
+      JSON.stringify(query.metrics) ===
+        JSON.stringify([
+          { expressionType: 'SQL', sqlExpression: '1', label: 'dummy_metric' },
+        ]);
+
+    it('falls back to the no-op query when no ID column is mapped', () => {
+      const [query] = buildQuery({
+        ...datasetFormData,
+        sensor_id_column: null,
+        sensor_name_column: null,
+        sensor_extra_columns: [],
+      }).queries;
+      expect(isNoOpQuery(query)).toBe(true);
+    });
+
+    it('does not query dataset columns while the source is the JSON file', () => {
+      const [query] = buildQuery({
+        ...datasetFormData,
+        sensor_source: 'json',
+      }).queries;
+      expect(isNoOpQuery(query)).toBe(true);
+    });
+  });
 });

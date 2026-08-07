@@ -17,9 +17,10 @@
  * under the License.
  */
 import { ChartProps } from '@superset-ui/core';
+import { SensorRow } from '../types';
 
 export default function transformProps(chartProps: ChartProps) {
-  const { width, height, formData } = chartProps;
+  const { width, height, formData, queriesData } = chartProps;
   const {
     boldText,
     headerFontSize,
@@ -28,9 +29,17 @@ export default function transformProps(chartProps: ChartProps) {
     backgroundColor,
     cameraZoom,
     showLabels,
+    sensorSource,
+    modelUrl,
+    sensorIdColumn,
+    sensorNameColumn,
+    sensorExtraColumns,
   } = formData;
 
   const parsedZoom = Number(cameraZoom);
+  // In JSON-file mode this is the single dummy row from buildQuery's no-op
+  // query, which the chart ignores.
+  const data = (queriesData?.[0]?.data || []) as SensorRow[];
 
   return {
     width,
@@ -44,5 +53,13 @@ export default function transformProps(chartProps: ChartProps) {
     // blank or nonsense rather than pushing the camera to NaN.
     cameraZoom: Number.isFinite(parsedZoom) && parsedZoom > 0 ? parsedZoom : 1,
     showLabels: showLabels !== false,
+    sensorSource: sensorSource === 'dataset' ? 'dataset' : 'json',
+    modelUrl: typeof modelUrl === 'string' ? modelUrl.trim() : '',
+    data,
+    sensorIdColumn,
+    sensorNameColumn,
+    sensorExtraColumns: Array.isArray(sensorExtraColumns)
+      ? sensorExtraColumns
+      : [],
   };
 }

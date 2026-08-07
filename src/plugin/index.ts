@@ -38,7 +38,8 @@ export default class SupersetPluginChartHelloWorld extends ChartPlugin {
    */
   constructor() {
     const metadata = new ChartMetadata({
-      description: 'Interactive 3D device viewer with clickable markers, driven by an uploaded JSON file',
+      description:
+        'Interactive 3D model viewer with clickable sensor markers. Sensors come from either an uploaded scene JSON file or the rows of a dataset, and are placed on the model by clicking it.',
       name: t('3D Device Viewer'),
       thumbnail,
     });
