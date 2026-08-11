@@ -40,6 +40,7 @@ import {
   setSensorRoster,
   subscribeState,
 } from './sensorEditorBridge';
+import { SensorDetailPanel, SensorGraphModal } from './SensorPanels';
 
 /** Fallback world size used to derive marker/label scale before a model has
  * loaded (or when the scene has no model at all). */
@@ -213,6 +214,8 @@ export default function SupersetPluginChartHelloWorld(
   const [error, setError] = useState<string>('');
   const [modelError, setModelError] = useState<string>('');
   const [selectedDevice, setSelectedDevice] = useState<DeviceDatum | null>(null);
+  // Whether the historical-data graph modal is open for the selected device.
+  const [showGraph, setShowGraph] = useState(false);
   const [modelWorldSize, setModelWorldSize] = useState<number | null>(null);
   // deviceId the control panel is waiting on a click for, mirrored from the
   // sensor-editor bridge into React state so the overlay can react to it.
@@ -589,8 +592,10 @@ export default function SupersetPluginChartHelloWorld(
       if (hits.length > 0) {
         const device = hits[0].object.userData.device as DeviceDatum | undefined;
         setSelectedDevice(device || null);
+        setShowGraph(false);
       } else {
         setSelectedDevice(null);
+        setShowGraph(false);
       }
     };
 
@@ -761,7 +766,6 @@ export default function SupersetPluginChartHelloWorld(
     camera.updateProjectionMatrix();
   }, [width, height]);
 
-  const detailRows = selectedDevice ? Object.entries(selectedDevice) : [];
   const pickTargetDevice = pickTargetId
     ? devices.find(d => d.deviceId === pickTargetId) || null
     : null;
@@ -911,64 +915,21 @@ export default function SupersetPluginChartHelloWorld(
       )}
 
       {selectedDevice && (
-        <div
-          style={{
-            position: 'absolute',
-            top: 12,
-            right: 16,
-            zIndex: 3,
-            width: 240,
-            maxHeight: '80%',
-            overflowY: 'auto',
-            background: 'rgba(255,255,255,0.97)',
-            border: '1px solid #e2e8f0',
-            borderRadius: '10px',
-            boxShadow: '0 4px 16px rgba(15,23,42,0.15)',
-            padding: '12px 14px',
-            fontSize: '12px',
-            color: '#0f172a',
+        <SensorDetailPanel
+          device={selectedDevice}
+          onClose={() => {
+            setSelectedDevice(null);
+            setShowGraph(false);
           }}
-        >
-          <div
-            style={{
-              display: 'flex',
-              justifyContent: 'space-between',
-              alignItems: 'center',
-              marginBottom: 8,
-            }}
-          >
-            <div style={{ fontWeight: 700, fontSize: 13 }}>
-              {selectedDevice.deviceName || selectedDevice.deviceId}
-            </div>
-            <button
-              type="button"
-              onClick={() => setSelectedDevice(null)}
-              style={{
-                border: 'none',
-                background: 'transparent',
-                cursor: 'pointer',
-                fontSize: 14,
-                color: '#64748b',
-                lineHeight: 1,
-              }}
-              aria-label="Close"
-            >
-              ×
-            </button>
-          </div>
-          {detailRows.map(([key, val]) => (
-            <div key={key} style={{ display: 'flex', marginBottom: 4 }}>
-              <div style={{ width: 90, color: '#64748b', flexShrink: 0 }}>
-                {key}
-              </div>
-              <div style={{ wordBreak: 'break-word' }}>
-                {key === 'position' && Array.isArray(val)
-                  ? (val as number[]).map(n => Number(n).toFixed(3)).join(', ')
-                  : String(val)}
-              </div>
-            </div>
-          ))}
-        </div>
+          onViewGraph={() => setShowGraph(true)}
+        />
+      )}
+
+      {selectedDevice && showGraph && (
+        <SensorGraphModal
+          device={selectedDevice}
+          onClose={() => setShowGraph(false)}
+        />
       )}
 
       {(resolvedModelUrl || placedDevices.length > 0) && (
