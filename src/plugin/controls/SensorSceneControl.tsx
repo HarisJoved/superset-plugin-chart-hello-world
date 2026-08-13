@@ -26,6 +26,7 @@ import {
   subscribePick,
   subscribeState,
 } from '../../sensorEditorBridge';
+import { parseSensorId, resolveNgsiId } from '../../api';
 
 interface SensorSceneControlProps {
   value?: string;
@@ -35,9 +36,12 @@ interface SensorSceneControlProps {
 }
 
 const DEFAULT_COLOR = '#2563eb';
+/** Bucket key for sensors whose id doesn't parse as a full NGSI urn, so we
+ * can't tell which model they belong to. */
+const UNGROUPED_KEY = '__ungrouped__';
 
 /** Normalises whatever came out of the JSON into a `#rrggbb` value that
- * `<input type="color">` will accept — it silently falls back to black for
+ * `<input type="color">` will accept  it silently falls back to black for
  * anything else, which looks like a bug to the user. */
 function toHexColor(raw: unknown): string {
   if (typeof raw === 'string' && /^#[0-9a-fA-F]{6}$/.test(raw)) return raw;
@@ -104,13 +108,13 @@ const buttonStyle: React.CSSProperties = {
  * halves of the scene workflow:
  *
  *  1. uploading a scene .json file, and
- *  2. editing the sensors in it — position (by clicking the model in the
+ *  2. editing the sensors in it  position (by clicking the model in the
  *     viewer), marker colour, and marker size.
  *
  * Everything is stored back into the *same* form-data field as the raw JSON
  * text, so edits round-trip through Superset's normal control machinery and
  * the field's `renderTrigger` re-renders the viewer live. Position picking
- * needs a click inside the chart canvas, which is a different React tree —
+ * needs a click inside the chart canvas, which is a different React tree 
  * see `sensorEditorBridge` for that hand-off.
  */
 export default function SensorSceneControl({
@@ -123,6 +127,7 @@ export default function SensorSceneControl({
   const [error, setError] = useState<string>('');
   const [scene, setScene] = useState<SceneData | null>(null);
   const [expandedId, setExpandedId] = useState<string | null>(null);
+  const [expandedModel, setExpandedModel] = useState<string | null>(null);
   const [pickingId, setPickingId] = useState<string | null>(null);
   const [modelMaxDim, setModelMaxDim] = useState<number | null>(null);
   const [copyFeedback, setCopyFeedback] = useState<string>('');
@@ -279,6 +284,7 @@ export default function SensorSceneControl({
           }
           setFileName(file.name);
           setExpandedId(null);
+          setExpandedModel(null);
           setPickingId(null);
           setPickTarget(null);
           sceneRef.current = parsed as SceneData;
@@ -312,6 +318,31 @@ export default function SensorSceneControl({
       }))
     : storedDevices;
 
+  /**
+   * Sensors grouped by their NGSI model type ("Coolon-Light"), in first-seen
+   * order. Sensors whose id doesn't parse as a full `urn:ngsi-v2:...` (so we
+   * can't tell what model they belong to) land in one catch-all "Other
+   * sensors" bucket, keyed by `UNGROUPED_KEY`.
+   */
+  const modelGroups = useMemo(() => {
+    const order: string[] = [];
+    const byKey = new Map<string, DeviceDatum[]>();
+    devices.forEach(device => {
+      const parsed = parseSensorId(resolveNgsiId(device));
+      const key = parsed.isNgsiUrn && parsed.modelName ? parsed.modelName : UNGROUPED_KEY;
+      if (!byKey.has(key)) {
+        order.push(key);
+        byKey.set(key, []);
+      }
+      byKey.get(key)!.push(device);
+    });
+    return order.map(key => ({
+      key,
+      label: key === UNGROUPED_KEY ? 'Other sensors' : key,
+      sensors: byKey.get(key)!,
+    }));
+  }, [devices]);
+
   function togglePick(deviceId: string) {
     if (pickingId === deviceId) {
       setPickingId(null);
@@ -322,23 +353,27 @@ export default function SensorSceneControl({
     }
   }
 
-  function applyToAll(source: DeviceDatum) {
+  /**
+   * Every sensor under one model shares a marker colour & size  there's no
+   * per-sensor styling control any more, only this. Upserts the patch onto
+   * every device in the group (dataset-sourced sensors that have never been
+   * placed get created here too, same as `updateDevice`).
+   */
+  function applyStyleToGroup(
+    sensors: DeviceDatum[],
+    patch: Partial<Pick<DeviceDatum, 'markerColor' | 'markerSize'>>,
+  ) {
     const current: SceneData = sceneRef.current ?? { devices: [] };
-    const markerColor = toHexColor(source.markerColor);
-    const markerSize = source.markerSize ?? bounds.fallback;
-    // Keyed by id so this upserts across the visible list — in dataset mode
-    // most of those sensors may not be in the stored array yet.
     const byId = new Map<string, DeviceDatum>(
       current.devices.map(d => [d.deviceId, d] as [string, DeviceDatum]),
     );
-    devices.forEach(row => {
+    sensors.forEach(row => {
       byId.set(row.deviceId, {
         ...(byId.get(row.deviceId) ?? {
           deviceId: row.deviceId,
           deviceName: row.deviceName,
         }),
-        markerColor,
-        markerSize,
+        ...patch,
       });
     });
     applyScene({ ...current, devices: Array.from(byId.values()) });
@@ -355,7 +390,7 @@ export default function SensorSceneControl({
   }
 
   function copyJson() {
-    // In dataset mode, export the merged view — roster names plus placements —
+    // In dataset mode, export the merged view  roster names plus placements 
     // so the result is a portable scene file that works in JSON mode too. In
     // file mode, export exactly what's stored so the round-trip is lossless.
     const payload: SceneData = fromDataset
@@ -367,7 +402,7 @@ export default function SensorSceneControl({
         setCopyFeedback('Copied!');
         window.setTimeout(() => setCopyFeedback(''), 2000);
       })
-      .catch(() => setCopyFeedback('Copy failed — check clipboard permissions.'));
+      .catch(() => setCopyFeedback('Copy failed  check clipboard permissions.'));
   }
 
   return (
@@ -411,7 +446,7 @@ export default function SensorSceneControl({
         <div style={{ fontSize: 11, color: '#8e94a1', marginTop: 8 }}>
           No sensors yet. Either upload a scene file above, or set Sensor Source
           to &ldquo;Dataset rows&rdquo; and map a Sensor ID Column in the Data
-          tab — the sensors will then be listed here to place on the model.
+          tab  the sensors will then be listed here to place on the model.
         </div>
       )}
 
@@ -439,40 +474,39 @@ export default function SensorSceneControl({
               : 'From the uploaded file.'}
           </div>
 
-          {devices.map(device => {
-            const expanded = device.deviceId === expandedId;
-            const picking = device.deviceId === pickingId;
-            const placed = isPlaced(device);
-            const color = toHexColor(device.markerColor);
-            const size = device.markerSize ?? bounds.fallback;
-            const position: Position3 = (device.position || [0, 0, 0]) as Position3;
+          {modelGroups.map(group => {
+            const groupExpanded = group.key === expandedModel;
+            const groupPlaced = group.sensors.filter(isPlaced).length;
+            const groupColor = toHexColor(group.sensors[0]?.markerColor);
+            const groupSize = group.sensors[0]?.markerSize ?? bounds.fallback;
 
             return (
               <div
-                key={device.deviceId}
+                key={group.key}
                 style={{
                   border: '1px solid #e2e8f0',
                   borderRadius: 4,
                   marginBottom: 6,
                   overflow: 'hidden',
-                  background: expanded ? '#f8fafc' : 'white',
+                  background: groupExpanded ? '#f8fafc' : 'white',
                 }}
               >
                 <button
                   type="button"
                   onClick={() =>
-                    setExpandedId(expanded ? null : device.deviceId)
+                    setExpandedModel(groupExpanded ? null : group.key)
                   }
                   style={{
                     width: '100%',
                     display: 'flex',
                     alignItems: 'center',
                     gap: 6,
-                    padding: '6px 8px',
+                    padding: '7px 8px',
                     border: 'none',
                     background: 'transparent',
                     cursor: 'pointer',
                     fontSize: 12,
+                    fontWeight: 700,
                     textAlign: 'left',
                     color: '#323b48',
                   }}
@@ -482,10 +516,8 @@ export default function SensorSceneControl({
                       width: 10,
                       height: 10,
                       borderRadius: '50%',
-                      background: placed ? color : 'transparent',
-                      border: placed
-                        ? '1px solid rgba(15,23,42,0.2)'
-                        : '1px dashed #b0b6c3',
+                      background: groupColor,
+                      border: '1px solid rgba(15,23,42,0.2)',
                       flexShrink: 0,
                     }}
                   />
@@ -495,44 +527,27 @@ export default function SensorSceneControl({
                       textOverflow: 'ellipsis',
                       whiteSpace: 'nowrap',
                       flex: 1,
-                      color: placed ? '#323b48' : '#8e94a1',
                     }}
                   >
-                    {device.deviceName || device.deviceId}
+                    {group.label}
                   </span>
-                  {!placed && (
-                    <span
-                      style={{
-                        fontSize: 10,
-                        color: '#8e94a1',
-                        border: '1px solid #e2e8f0',
-                        borderRadius: 3,
-                        padding: '0 4px',
-                        flexShrink: 0,
-                      }}
-                    >
-                      unplaced
-                    </span>
-                  )}
-                  <span style={{ color: '#8e94a1', fontSize: 10 }}>
-                    {expanded ? '▲' : '▼'}
+                  <span style={{ color: '#8e94a1', fontWeight: 400, fontSize: 11, flexShrink: 0 }}>
+                    {groupPlaced}/{group.sensors.length} placed
+                  </span>
+                  <span style={{ color: '#8e94a1', fontSize: 10, flexShrink: 0 }}>
+                    {groupExpanded ? '�' : '�'}
                   </span>
                 </button>
 
-                {expanded && (
-                  <div
-                    style={{
-                      padding: '8px',
-                      borderTop: '1px solid #e2e8f0',
-                    }}
-                  >
+                {groupExpanded && (
+                  <div style={{ padding: '8px', borderTop: '1px solid #e2e8f0' }}>
                     <div style={rowStyle}>
                       <span style={fieldLabelStyle}>Colour</span>
                       <input
                         type="color"
-                        value={color}
+                        value={groupColor}
                         onChange={e =>
-                          updateDevice(device.deviceId, {
+                          applyStyleToGroup(group.sensors, {
                             markerColor: e.target.value,
                           })
                         }
@@ -549,9 +564,9 @@ export default function SensorSceneControl({
                       />
                       <input
                         type="text"
-                        value={color}
+                        value={groupColor}
                         onChange={e =>
-                          updateDevice(device.deviceId, {
+                          applyStyleToGroup(group.sensors, {
                             markerColor: e.target.value,
                           })
                         }
@@ -566,9 +581,9 @@ export default function SensorSceneControl({
                         min={bounds.min}
                         max={bounds.max}
                         step={bounds.step}
-                        value={size}
+                        value={groupSize}
                         onChange={e =>
-                          updateDevice(device.deviceId, {
+                          applyStyleToGroup(group.sensors, {
                             markerSize: Number(e.target.value),
                           })
                         }
@@ -578,9 +593,9 @@ export default function SensorSceneControl({
                         type="number"
                         min={0}
                         step={bounds.step}
-                        value={size}
+                        value={groupSize}
                         onChange={e =>
-                          updateDevice(device.deviceId, {
+                          applyStyleToGroup(group.sensors, {
                             markerSize: Number(e.target.value) || 0,
                           })
                         }
@@ -588,62 +603,165 @@ export default function SensorSceneControl({
                       />
                     </div>
 
-                    <div style={rowStyle}>
-                      <span style={fieldLabelStyle}>Position</span>
-                      <div style={{ display: 'flex', gap: 4, flex: 1, minWidth: 0 }}>
-                        {[0, 1, 2].map(axis => (
-                          <input
-                            // eslint-disable-next-line react/no-array-index-key
-                            key={axis}
-                            type="number"
-                            step={0.01}
-                            value={position[axis] ?? 0}
-                            onChange={e => {
-                              const next: Position3 = [...position] as Position3;
-                              next[axis] = Number(e.target.value) || 0;
-                              updateDevice(device.deviceId, { position: next });
-                            }}
-                            style={numberInputStyle}
-                          />
-                        ))}
-                      </div>
-                    </div>
-
-                    <button
-                      type="button"
-                      onClick={() => togglePick(device.deviceId)}
+                    <div
                       style={{
-                        ...buttonStyle,
-                        marginTop: 2,
-                        border: 'none',
-                        color: 'white',
-                        background: picking ? '#dc2626' : '#2563eb',
+                        fontSize: 10,
+                        color: '#8e94a1',
+                        margin: '2px 0 10px',
                       }}
                     >
-                      {picking
-                        ? 'Click the model in the viewer… (cancel)'
-                        : placed
-                          ? 'Re-pick position on model'
-                          : 'Pick position on model'}
-                    </button>
+                      Colour &amp; size apply to all {group.sensors.length} sensor
+                      {group.sensors.length === 1 ? '' : 's'} under {group.label}.
+                    </div>
 
-                    <button
-                      type="button"
-                      onClick={() => applyToAll(device)}
-                      style={{ ...buttonStyle, marginTop: 6 }}
+                    <div
+                      style={{
+                        fontSize: 10,
+                        fontWeight: 700,
+                        color: '#8e94a1',
+                        textTransform: 'uppercase',
+                        letterSpacing: '0.03em',
+                        margin: '2px 0 4px',
+                      }}
                     >
-                      Apply this colour &amp; size to all sensors
-                    </button>
+                      Sensors
+                    </div>
 
-                    {placed && (
-                      <button
-                        type="button"
-                        onClick={() => clearPlacement(device.deviceId)}
-                        style={{ ...buttonStyle, marginTop: 6, color: '#b91c1c' }}
-                      >
-                        Remove from model
-                      </button>
-                    )}
+                    {group.sensors.map(device => {
+                      const expanded = device.deviceId === expandedId;
+                      const picking = device.deviceId === pickingId;
+                      const placed = isPlaced(device);
+                      const position: Position3 = (device.position || [0, 0, 0]) as Position3;
+                      const parsedId = parseSensorId(resolveNgsiId(device));
+                      const label = parsedId.sensorName || device.deviceName || device.deviceId;
+
+                      return (
+                        <div
+                          key={device.deviceId}
+                          style={{
+                            border: '1px solid #e2e8f0',
+                            borderRadius: 4,
+                            marginBottom: 6,
+                            overflow: 'hidden',
+                            background: expanded ? 'white' : '#fbfcfe',
+                          }}
+                        >
+                          <button
+                            type="button"
+                            onClick={() =>
+                              setExpandedId(expanded ? null : device.deviceId)
+                            }
+                            style={{
+                              width: '100%',
+                              display: 'flex',
+                              alignItems: 'center',
+                              gap: 6,
+                              padding: '6px 8px',
+                              border: 'none',
+                              background: 'transparent',
+                              cursor: 'pointer',
+                              fontSize: 12,
+                              textAlign: 'left',
+                              color: '#323b48',
+                            }}
+                          >
+                            <span
+                              style={{
+                                width: 8,
+                                height: 8,
+                                borderRadius: '50%',
+                                background: placed ? groupColor : 'transparent',
+                                border: placed
+                                  ? '1px solid rgba(15,23,42,0.2)'
+                                  : '1px dashed #b0b6c3',
+                                flexShrink: 0,
+                              }}
+                            />
+                            <span
+                              style={{
+                                overflow: 'hidden',
+                                textOverflow: 'ellipsis',
+                                whiteSpace: 'nowrap',
+                                flex: 1,
+                                color: placed ? '#323b48' : '#8e94a1',
+                              }}
+                            >
+                              {label}
+                            </span>
+                            {!placed && (
+                              <span
+                                style={{
+                                  fontSize: 10,
+                                  color: '#8e94a1',
+                                  border: '1px solid #e2e8f0',
+                                  borderRadius: 3,
+                                  padding: '0 4px',
+                                  flexShrink: 0,
+                                }}
+                              >
+                                unplaced
+                              </span>
+                            )}
+                            <span style={{ color: '#8e94a1', fontSize: 10 }}>
+                              {expanded ? '�' : '�'}
+                            </span>
+                          </button>
+
+                          {expanded && (
+                            <div style={{ padding: '8px', borderTop: '1px solid #e2e8f0' }}>
+                              <div style={rowStyle}>
+                                <span style={fieldLabelStyle}>Position</span>
+                                <div style={{ display: 'flex', gap: 4, flex: 1, minWidth: 0 }}>
+                                  {[0, 1, 2].map(axis => (
+                                    <input
+                                      // eslint-disable-next-line react/no-array-index-key
+                                      key={axis}
+                                      type="number"
+                                      step={0.01}
+                                      value={position[axis] ?? 0}
+                                      onChange={e => {
+                                        const next: Position3 = [...position] as Position3;
+                                        next[axis] = Number(e.target.value) || 0;
+                                        updateDevice(device.deviceId, { position: next });
+                                      }}
+                                      style={numberInputStyle}
+                                    />
+                                  ))}
+                                </div>
+                              </div>
+
+                              <button
+                                type="button"
+                                onClick={() => togglePick(device.deviceId)}
+                                style={{
+                                  ...buttonStyle,
+                                  marginTop: 2,
+                                  border: 'none',
+                                  color: 'white',
+                                  background: picking ? '#dc2626' : '#2563eb',
+                                }}
+                              >
+                                {picking
+                                  ? 'Click the model in the viewer& (cancel)'
+                                  : placed
+                                    ? 'Re-pick position on model'
+                                    : 'Pick position on model'}
+                              </button>
+
+                              {placed && (
+                                <button
+                                  type="button"
+                                  onClick={() => clearPlacement(device.deviceId)}
+                                  style={{ ...buttonStyle, marginTop: 6, color: '#b91c1c' }}
+                                >
+                                  Remove from model
+                                </button>
+                              )}
+                            </div>
+                          )}
+                        </div>
+                      );
+                    })}
                   </div>
                 )}
               </div>

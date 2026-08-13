@@ -41,6 +41,14 @@ import {
   subscribeState,
 } from './sensorEditorBridge';
 import { SensorDetailPanel, SensorGraphModal } from './SensorPanels';
+import { parseSensorId, resolveNgsiId } from './api';
+
+/** "Aelita2S-002" instead of "urn:ngsi-v2:Coolon-Light:Aelita2S-002" — used
+ * anywhere a sensor's name is rendered in the 3D scene or its overlays. */
+function displayName(device: DeviceDatum): string {
+  const parsed = parseSensorId(resolveNgsiId(device));
+  return parsed.sensorName || device.deviceName || device.deviceId;
+}
 
 /** Fallback world size used to derive marker/label scale before a model has
  * loaded (or when the scene has no model at all). */
@@ -142,10 +150,7 @@ function buildDeviceGroup(
     markerMeshesOut.push(mesh);
 
     if (showLabels && (device.deviceName || device.deviceId)) {
-      const label = makeLabelSprite(
-        device.deviceName || device.deviceId,
-        worldSize * 0.18,
-      );
+      const label = makeLabelSprite(displayName(device), worldSize * 0.18);
       label.position
         .copy(pos)
         .add(new THREE.Vector3(0, radius + worldSize * 0.03, 0));
@@ -889,7 +894,7 @@ export default function SupersetPluginChartHelloWorld(
         >
           {modelWorldSize !== null
             ? `Click the model to place ${
-                pickTargetDevice?.deviceName || pickTargetId
+                pickTargetDevice ? displayName(pickTargetDevice) : pickTargetId
               } — Esc to cancel`
             : 'Load a model (modelUrl) before picking a position'}
         </div>

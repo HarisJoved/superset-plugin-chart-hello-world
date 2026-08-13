@@ -27,6 +27,8 @@ import {
   fetchLatestDeviceData,
   formatAttrLabel,
   formatAttrValue,
+  parseSensorId,
+  resolveNgsiId,
 } from './api';
 
 /* ------------------------------------------------------------------ */
@@ -87,10 +89,13 @@ interface DetailPanelProps {
 }
 
 export function SensorDetailPanel({ device, onClose, onViewGraph }: DetailPanelProps) {
-  const { data, loading, error } = useLatestDeviceData(device.deviceId);
-  const title = device.deviceName || device.deviceId;
-  const eyebrow = `${data?.entityType || device.modelName || 'Device'} sensor`.toUpperCase();
-  const pill = data?.category || device.modelName || data?.entityType;
+  const ngsiId = resolveNgsiId(device);
+  const { data, loading, error } = useLatestDeviceData(ngsiId);
+  const parsed = parseSensorId(ngsiId);
+  const modelName = data?.entityType || device.modelName || parsed.modelName || 'Device';
+  const title = parsed.sensorName || device.deviceName || device.deviceId;
+  const eyebrow = `${modelName} sensor`.toUpperCase();
+  const pill = data?.category || modelName;
 
   return (
     <div
@@ -380,7 +385,10 @@ interface GraphModalProps {
 }
 
 export function SensorGraphModal({ device, entityType, onClose }: GraphModalProps) {
-  const modelName = deriveModelName(device.deviceId, entityType || device.modelName);
+  const ngsiId = resolveNgsiId(device);
+  const parsed = parseSensorId(ngsiId);
+  const modelName = deriveModelName(ngsiId, entityType || device.modelName);
+  const sensorName = parsed.sensorName || device.deviceName || device.deviceId;
   const [from, setFrom] = useState('');
   const [to, setTo] = useState('');
   const [result, setResult] = useState<HistoryResult | null>(null);
@@ -395,7 +403,7 @@ export function SensorGraphModal({ device, entityType, onClose }: GraphModalProp
     }
     setLoading(true);
     setError('');
-    fetchDeviceHistory(device.deviceId, modelName, {
+    fetchDeviceHistory(ngsiId, modelName, {
       from: from || undefined,
       to: to || undefined,
       latest: from || to ? undefined : 1,
@@ -408,7 +416,7 @@ export function SensorGraphModal({ device, entityType, onClose }: GraphModalProp
   useEffect(() => {
     load();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [device.deviceId]);
+  }, [ngsiId]);
 
   const series = result?.series || [];
   const allCollapsed = series.length > 0 && collapsedIds.size === series.length;
@@ -456,7 +464,10 @@ export function SensorGraphModal({ device, entityType, onClose }: GraphModalProp
         }}
       >
         <div style={{ fontWeight: 700, fontSize: 14 }}>
-          ↗ Sensor Graph - {device.deviceName || device.deviceId}
+          ↗ Sensor Graph - {sensorName}
+          {modelName && (
+            <span style={{ fontWeight: 500, color: '#64748b' }}> · {modelName}</span>
+          )}
         </div>
         <div style={{ display: 'flex', gap: 10, alignItems: 'center' }}>
           <button

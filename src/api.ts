@@ -87,22 +87,64 @@ const NON_MEASUREMENT_KEYS = new Set([
 
 /**
  * The gateway needs the *full* NGSI id ("urn:ngsi-v2:Coolon-Light:Aelita2S-001") —
- * a bare "Aelita2S-001" 500s. In dataset mode the "Sensor ID Column" and
- * "Sensor Label Column" are two independent mappings, so it's entirely
- * possible (and, per a real device viewer, apparently the case) that the id
- * column holds the short id while the label column holds the full urn, or
- * vice versa. Rather than assume which one is "right", prefer whichever of
- * deviceId / deviceName actually looks like a full NGSI urn, and only fall
- * back to the raw deviceId if neither does.
+ * a bare "Aelita2S-001" 500s. Which field actually holds that full id is a
+ * dataset-configuration detail we can't assume: it might be the "Sensor ID
+ * Column" (deviceId), the "Sensor Label Column" (deviceName), or — as is
+ * apparently the case here — an "Extra Column" like Full_Device_Name, which
+ * lands under its own dynamic key on the device object. So rather than
+ * checking specific fields, scan every field on the device (in a stable,
+ * predictable order) and use the first one that actually looks like a full
+ * NGSI urn, falling back to the raw deviceId if none do.
  */
 const NGSI_URN_RE = /^urn:ngsi-v2:[^:]+:.+$/i;
 
-export function resolveNgsiId(deviceId: string, deviceName?: unknown): string {
-  if (NGSI_URN_RE.test(deviceId)) return deviceId;
-  if (typeof deviceName === 'string' && NGSI_URN_RE.test(deviceName)) {
-    return deviceName;
+export function resolveNgsiId(device: {
+  deviceId: string;
+  deviceName?: unknown;
+  [key: string]: unknown;
+}): string {
+  if (NGSI_URN_RE.test(device.deviceId)) return device.deviceId;
+  if (typeof device.deviceName === 'string' && NGSI_URN_RE.test(device.deviceName)) {
+    return device.deviceName;
   }
-  return deviceId;
+  const extraMatch = Object.keys(device)
+    .filter(k => k !== 'deviceId' && k !== 'deviceName')
+    .sort()
+    .map(k => device[k])
+    .find((v): v is string => typeof v === 'string' && NGSI_URN_RE.test(v));
+  return extraMatch || device.deviceId;
+}
+
+/** Parsed pieces of an NGSI urn: "urn:ngsi-v2:Coolon-Light:Aelita2S-002". */
+export interface ParsedSensorId {
+  /** "Coolon-Light" — the model/entity type. */
+  modelName: string;
+  /** "Aelita2S-002" — the human sensor name, with the urn stripped off. */
+  sensorName: string;
+  /** True if `ngsiId` actually parsed as a urn; false if we just fell back to the raw string. */
+  isNgsiUrn: boolean;
+}
+
+/**
+ * "urn:ngsi-v2:Coolon-Light:Aelita2S-002" -> { modelName: "Coolon-Light", sensorName: "Aelita2S-002" }
+ *
+ * This is the single source of truth for turning a raw NGSI id into
+ * display-friendly pieces — every place in the UI that shows a sensor name
+ * or its model should go through this instead of rendering the urn as-is.
+ * Anything that isn't a `urn:ngsi-v2:...` string (e.g. a device with no
+ * matching full-id field at all) is returned as-is for both pieces, so
+ * callers can render it without special-casing.
+ */
+export function parseSensorId(ngsiId: string): ParsedSensorId {
+  const parts = ngsiId.split(':');
+  if (parts.length >= 4 && parts[0].toLowerCase() === 'urn' && parts[1].toLowerCase() === 'ngsi-v2') {
+    return {
+      modelName: parts[2],
+      sensorName: parts.slice(3).join(':'),
+      isNgsiUrn: true,
+    };
+  }
+  return { modelName: '', sensorName: ngsiId, isNgsiUrn: false };
 }
 
 function buildQuery(params: Record<string, string | number | undefined>): string {
@@ -259,9 +301,7 @@ function parseHistoryResponse(json: unknown): HistoryResult {
 /** "Coolon-Light" out of "urn:ngsi-v2:Coolon-Light:Aelita2S-001". */
 export function deriveModelName(ngsiId: string, explicit?: string): string {
   if (explicit) return explicit;
-  const parts = ngsiId.split(':');
-  if (parts.length >= 4 && parts[0] === 'urn') return parts[2];
-  return explicit || '';
+  return parseSensorId(ngsiId).modelName;
 }
 
 export function formatAttrLabel(key: string): string {
