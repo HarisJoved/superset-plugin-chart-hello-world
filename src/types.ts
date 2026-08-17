@@ -62,6 +62,8 @@ export function isPlaced(device: DeviceDatum): boolean {
   );
 }
 
+import { MarkerShapeId } from './markerShapes';
+
 export interface SceneData {
   modelUrl?: string;
   resourceId?: string;
@@ -72,6 +74,28 @@ export interface SceneData {
   modelScale?: number;
   /** Optional [x,y,z] offset applied to the loaded model's position. */
   modelOffset?: [number, number, number];
+  /** Saved camera bookmarks — named points in the model the viewer's
+   * Location filter can jump the camera to. */
+  pois?: LocationPoi[];
+  /** Marker shape per sensor model, keyed the same way as the placement
+   * editor's model groups (parsed NGSI model name, or the "other sensors"
+   * bucket key). Every sensor under a model renders with its shape — there
+   * is no per-sensor override. */
+  modelShapes?: Record<string, MarkerShapeId>;
+}
+
+/**
+ * A named point of interest in the model — set up once in the Customize
+ * panel (by clicking the model or typing coordinates), then picked from the
+ * Location filter in the viewer to fly the camera there.
+ */
+export interface LocationPoi {
+  id: string;
+  name: string;
+  position: [number, number, number];
+  /** How far back the camera sits when flying here, in the model's world
+   * units. Falls back to a size-appropriate default when unset. */
+  zoomDistance?: number;
 }
 
 /** Where the list of sensors comes from. */

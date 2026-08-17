@@ -26,12 +26,14 @@ import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
 import {
   DeviceDatum,
+  LocationPoi,
   SceneData,
   SensorSource,
   SupersetPluginChartHelloWorldProps,
   isPlaced,
 } from './types';
 import {
+  PickTarget,
   Position3,
   emitPick,
   getPickTarget,
@@ -42,6 +44,7 @@ import {
 } from './sensorEditorBridge';
 import { SensorDetailPanel, SensorGraphModal } from './SensorPanels';
 import { parseSensorId, resolveNgsiId } from './api';
+import { buildMarkerShape } from './markerShapes';
 
 /** "Aelita2S-002" instead of "urn:ngsi-v2:Coolon-Light:Aelita2S-002" — used
  * anywhere a sensor's name is rendered in the 3D scene or its overlays. */
@@ -50,11 +53,33 @@ function displayName(device: DeviceDatum): string {
   return parsed.sensorName || device.deviceName || device.deviceId;
 }
 
+/** Bucket key for the model filter — sensors whose id doesn't parse as a
+ * full NGSI urn (so we can't tell which model they belong to) share this
+ * one "Other sensors" option, same convention as the placement editor. */
+const OTHER_MODEL_KEY = '__other_sensors__';
+
+function deviceModelKey(device: DeviceDatum): string {
+  const parsed = parseSensorId(resolveNgsiId(device));
+  return parsed.isNgsiUrn && parsed.modelName ? parsed.modelName : OTHER_MODEL_KEY;
+}
+
 /** Fallback world size used to derive marker/label scale before a model has
  * loaded (or when the scene has no model at all). */
 const FALLBACK_WORLD_SIZE = 5;
 
 const FALLBACK_MARKER_COLOR = '#2563eb';
+
+const filterSelectStyle: React.CSSProperties = {
+  fontSize: 11,
+  fontWeight: 600,
+  color: '#334155',
+  background: 'rgba(255,255,255,0.92)',
+  border: '1px solid #cbd5e1',
+  borderRadius: 6,
+  padding: '4px 8px',
+  cursor: 'pointer',
+  maxWidth: 190,
+};
 
 /**
  * The marker colour, guarded against values THREE can't parse. The editor's
@@ -121,6 +146,7 @@ function buildDeviceGroup(
   markerMeshesOut: THREE.Mesh[],
   worldSize: number,
   showLabels: boolean,
+  modelShapes: Record<string, string> | undefined,
 ): THREE.Group {
   const group = new THREE.Group();
   const defaultRadius = worldSize * 0.012;
@@ -133,21 +159,13 @@ function buildDeviceGroup(
         ? device.markerSize
         : defaultRadius;
 
-    const geometry = new THREE.SphereGeometry(radius, 20, 20);
     const color = new THREE.Color(markerColorOf(device));
-    const material = new THREE.MeshStandardMaterial({
-      color,
-      // A touch of self-illumination keeps markers readable when they sit in
-      // the model's shadow, without washing the chosen colour out.
-      emissive: color,
-      emissiveIntensity: 0.25,
-      roughness: 0.4,
-    });
-    const mesh = new THREE.Mesh(geometry, material);
-    mesh.position.copy(pos);
-    mesh.userData.device = device;
-    group.add(mesh);
-    markerMeshesOut.push(mesh);
+    const shapeId = modelShapes?.[deviceModelKey(device)];
+    const { group: markerGroup, coreMesh } = buildMarkerShape(shapeId, color, radius);
+    markerGroup.position.copy(pos);
+    coreMesh.userData.device = device;
+    group.add(markerGroup);
+    markerMeshesOut.push(coreMesh);
 
     if (showLabels && (device.deviceName || device.deviceId)) {
       const label = makeLabelSprite(displayName(device), worldSize * 0.18);
@@ -222,9 +240,13 @@ export default function SupersetPluginChartHelloWorld(
   // Whether the historical-data graph modal is open for the selected device.
   const [showGraph, setShowGraph] = useState(false);
   const [modelWorldSize, setModelWorldSize] = useState<number | null>(null);
-  // deviceId the control panel is waiting on a click for, mirrored from the
-  // sensor-editor bridge into React state so the overlay can react to it.
-  const [pickTargetId, setPickTargetId] = useState<string | null>(null);
+  // Target the control panel is waiting on a click for (device placement or
+  // location pick), mirrored from the sensor-editor bridge into React state
+  // so the overlay can react to it.
+  const [pickTarget, setPickTargetState] = useState<PickTarget | null>(null);
+  // Runtime filters — local to the viewer, not persisted with the chart.
+  const [modelFilter, setModelFilter] = useState<string>('__all__');
+  const [locationFilter, setLocationFilter] = useState<string>('');
 
   const fontSizes: Record<string, string> = {
     xxs: '12px',
@@ -323,6 +345,29 @@ export default function SupersetPluginChartHelloWorld(
   // Only placed sensors get a marker — dataset sensors start out with no
   // position and would otherwise all pile up at the origin.
   const placedDevices = devices.filter(isPlaced);
+  // The model-name filter above the viewer. "__all__" is every placed
+  // sensor; anything else is one model key from `deviceModelKey`.
+  const modelOptions = Array.from(new Set(placedDevices.map(deviceModelKey)));
+  // Falls back to "All" if the previously selected model filter no longer
+  // has any sensors under it (e.g. the dataset changed underneath it).
+  const effectiveModelFilter =
+    modelFilter === '__all__' || modelOptions.includes(modelFilter)
+      ? modelFilter
+      : '__all__';
+  const visibleDevices =
+    effectiveModelFilter === '__all__'
+      ? placedDevices
+      : placedDevices.filter(d => deviceModelKey(d) === effectiveModelFilter);
+  // Saved camera bookmarks from the Customize panel's Locations editor.
+  const pois = sceneData?.pois ?? [];
+  const effectiveLocationFilter = pois.some(p => p.id === locationFilter)
+    ? locationFilter
+    : '';
+  const modelShapes = sceneData?.modelShapes;
+  // Only used to decide whether the marker-rebuild effect needs to run —
+  // modelShapes is a fresh object reference on every scene update, so a
+  // plain dependency would rebuild markers on every unrelated edit too.
+  const modelShapesSignature = JSON.stringify(modelShapes ?? {});
   // Serialised marker inputs — lets the marker-rebuild effect fire on colour
   // / size / position edits from the control panel without also refetching
   // the GLB every time an unrelated part of the scene JSON changes.
@@ -355,7 +400,7 @@ export default function SupersetPluginChartHelloWorld(
 
   // Mirror the control panel's pick request into local state.
   useEffect(() => {
-    const sync = () => setPickTargetId(getPickTarget());
+    const sync = () => setPickTargetState(getPickTarget());
     sync();
     return subscribeState(sync);
   }, []);
@@ -461,6 +506,40 @@ export default function SupersetPluginChartHelloWorld(
     controls.update();
   }
   frameCameraRef.current = frameCamera;
+
+  /**
+   * Points the camera at a saved location bookmark instead of fitting the
+   * whole model — same three-quarter viewing angle as `frameCamera`, just
+   * centred on the bookmark's point at its own fixed distance rather than
+   * one computed to fit a bounding box. Called directly from the Location
+   * filter's onChange, so (unlike frameCamera) it doesn't need a ref: there
+   * is no later effect that needs to call a "current" version of it.
+   */
+  function flyToLocation(loc: LocationPoi) {
+    const camera = cameraRef.current;
+    const controls = controlsRef.current;
+    if (!camera || !controls) return;
+    const [x, y, z] = loc.position || [0, 0, 0];
+    const center = new THREE.Vector3(x || 0, y || 0, z || 0);
+    const fallbackDistance = (modelWorldSize ?? FALLBACK_WORLD_SIZE) * 0.3;
+    const distance =
+      typeof loc.zoomDistance === 'number' && loc.zoomDistance > 0
+        ? loc.zoomDistance
+        : fallbackDistance;
+
+    const direction = new THREE.Vector3(1, 0.55, 1).normalize();
+    camera.position.copy(center).add(direction.clone().multiplyScalar(distance));
+    camera.near = Math.max(distance / 200, 1e-6);
+    camera.far = distance * 30 + distance * 10;
+    camera.updateProjectionMatrix();
+    camera.lookAt(center);
+    camera.updateMatrixWorld();
+
+    controls.target.copy(center);
+    controls.minDistance = distance * 0.02;
+    controls.maxDistance = Math.max(controls.maxDistance, distance * 20);
+    controls.update();
+  }
 
   function raycastMarkersAt(clientX: number, clientY: number): THREE.Intersection[] {
     const renderer = rendererRef.current;
@@ -581,14 +660,14 @@ export default function SupersetPluginChartHelloWorld(
     if (!renderer) return undefined;
 
     const handleClick = (event: MouseEvent) => {
-      if (pickTargetId) {
+      if (pickTarget) {
         const hits = raycastModelAt(event.clientX, event.clientY);
         if (hits.length > 0) {
           const p = hits[0].point;
           // Hand the position back to the sensor editor in the control
           // panel; it writes it into the scene JSON, which flows back down
-          // here as new props and moves the marker.
-          emitPick(pickTargetId, [p.x, p.y, p.z] as Position3);
+          // here as new props and moves the marker (or the location pin).
+          emitPick(pickTarget.kind, pickTarget.id, [p.x, p.y, p.z] as Position3);
         }
         return;
       }
@@ -605,7 +684,7 @@ export default function SupersetPluginChartHelloWorld(
     };
 
     const handleMouseMove = (event: MouseEvent) => {
-      if (pickTargetId) {
+      if (pickTarget) {
         renderer.domElement.style.cursor = 'crosshair';
         return;
       }
@@ -614,7 +693,7 @@ export default function SupersetPluginChartHelloWorld(
     };
 
     const handleKeyDown = (event: KeyboardEvent) => {
-      if (event.key === 'Escape' && pickTargetId) setPickTarget(null);
+      if (event.key === 'Escape' && pickTarget) setPickTarget(null);
     };
 
     renderer.domElement.addEventListener('click', handleClick);
@@ -628,7 +707,7 @@ export default function SupersetPluginChartHelloWorld(
       renderer.domElement.style.cursor = 'default';
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [pickTargetId]);
+  }, [pickTarget]);
 
   // Load / reload the GLB model whenever modelUrl changes.
   useEffect(() => {
@@ -713,9 +792,9 @@ export default function SupersetPluginChartHelloWorld(
 
   // Rebuild device markers whenever a marker's position, colour or size
   // changes in the scene JSON (i.e. on every edit made in the control
-  // panel's sensor editor), or when the model's measured size changes the
-  // defaults. Independent of the model load, so editing a sensor never
-  // refetches the GLB.
+  // panel's sensor editor), the model filter changes, or the model's
+  // measured size changes the defaults. Independent of the model load, so
+  // editing a sensor never refetches the GLB.
   useEffect(() => {
     const scene = sceneRef.current;
     if (!scene) return;
@@ -727,14 +806,15 @@ export default function SupersetPluginChartHelloWorld(
     }
     markerMeshesRef.current = [];
 
-    if (placedDevices.length === 0) return;
+    if (visibleDevices.length === 0) return;
 
     const newMarkers: THREE.Mesh[] = [];
     const group = buildDeviceGroup(
-      placedDevices,
+      visibleDevices,
       newMarkers,
       modelWorldSize ?? FALLBACK_WORLD_SIZE,
       showLabels,
+      modelShapes,
     );
     deviceGroupRef.current = group;
     markerMeshesRef.current = newMarkers;
@@ -751,7 +831,13 @@ export default function SupersetPluginChartHelloWorld(
       frameCameraRef.current();
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [deviceSignature, modelWorldSize, showLabels]);
+  }, [
+    deviceSignature,
+    modelWorldSize,
+    showLabels,
+    effectiveModelFilter,
+    modelShapesSignature,
+  ]);
 
   // Re-frame when the zoom control changes.
   useEffect(() => {
@@ -771,9 +857,17 @@ export default function SupersetPluginChartHelloWorld(
     camera.updateProjectionMatrix();
   }, [width, height]);
 
-  const pickTargetDevice = pickTargetId
-    ? devices.find(d => d.deviceId === pickTargetId) || null
-    : null;
+  // Human-readable label for whatever is currently armed for pick mode —
+  // a device name, a location's name, or the raw id as a last resort.
+  const pickTargetLabel = (() => {
+    if (!pickTarget) return '';
+    if (pickTarget.kind === 'device') {
+      const device = devices.find(d => d.deviceId === pickTarget.id);
+      return device ? displayName(device) : pickTarget.id;
+    }
+    const loc = pois.find(p => p.id === pickTarget.id);
+    return loc?.name || pickTarget.id;
+  })();
 
   // Nothing to look at yet — say which knob is missing rather than showing an
   // empty grey box.
@@ -828,6 +922,67 @@ export default function SupersetPluginChartHelloWorld(
         {headerText || '3D Device Viewer'}
       </div>
 
+      {(modelOptions.length > 1 || pois.length > 0) && (
+        <div
+          style={{
+            position: 'absolute',
+            top: 48,
+            left: 16,
+            zIndex: 3,
+            display: 'flex',
+            gap: 6,
+            flexWrap: 'wrap',
+            maxWidth: 'calc(100% - 32px)',
+          }}
+        >
+          {modelOptions.length > 1 && (
+            <select
+              value={effectiveModelFilter}
+              onChange={e => setModelFilter(e.target.value)}
+              aria-label="Filter by sensor model"
+              style={filterSelectStyle}
+            >
+              <option value="__all__">All sensors ({placedDevices.length})</option>
+              {modelOptions.map(key => {
+                const count = placedDevices.filter(
+                  d => deviceModelKey(d) === key,
+                ).length;
+                return (
+                  <option key={key} value={key}>
+                    {key === OTHER_MODEL_KEY ? 'Other sensors' : key} ({count})
+                  </option>
+                );
+              })}
+            </select>
+          )}
+
+          {pois.length > 0 && (
+            <select
+              value={effectiveLocationFilter}
+              onChange={e => {
+                const id = e.target.value;
+                setLocationFilter(id);
+                if (!id) {
+                  frameCameraRef.current();
+                  return;
+                }
+                const loc = pois.find(p => p.id === id);
+                if (loc) flyToLocation(loc);
+              }}
+              aria-label="Jump to a saved location"
+              style={filterSelectStyle}
+            >
+              <option value="">Full view</option>
+              {pois.map(loc => (
+                <option key={loc.id} value={loc.id}>
+                  {loc.name || 'Untitled location'}
+                </option>
+              ))}
+            </select>
+          )}
+        </div>
+      )}
+
       {setupMessage && (
         <div
           style={{
@@ -870,7 +1025,7 @@ export default function SupersetPluginChartHelloWorld(
 
       {/* Pick mode is driven from the sensor editor in the control panel;
           this is the only thing that overlays the canvas while it's on. */}
-      {pickTargetId && (
+      {pickTarget && (
         <div
           style={{
             position: 'absolute',
@@ -893,9 +1048,7 @@ export default function SupersetPluginChartHelloWorld(
           }}
         >
           {modelWorldSize !== null
-            ? `Click the model to place ${
-                pickTargetDevice ? displayName(pickTargetDevice) : pickTargetId
-              } — Esc to cancel`
+            ? `Click the model to place ${pickTargetLabel} — Esc to cancel`
             : 'Load a model (modelUrl) before picking a position'}
         </div>
       )}

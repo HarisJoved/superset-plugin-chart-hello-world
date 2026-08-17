@@ -17,7 +17,7 @@
  * under the License.
  */
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { DeviceDatum, SceneData, isPlaced } from '../../types';
+import { DeviceDatum, LocationPoi, SceneData, isPlaced } from '../../types';
 import {
   Position3,
   getModelInfo,
@@ -27,6 +27,11 @@ import {
   subscribeState,
 } from '../../sensorEditorBridge';
 import { parseSensorId, resolveNgsiId } from '../../api';
+import {
+  DEFAULT_MARKER_SHAPE,
+  MARKER_SHAPE_OPTIONS,
+  MarkerShapeId,
+} from '../../markerShapes';
 
 interface SensorSceneControlProps {
   value?: string;
@@ -41,7 +46,7 @@ const DEFAULT_COLOR = '#2563eb';
 const UNGROUPED_KEY = '__ungrouped__';
 
 /** Normalises whatever came out of the JSON into a `#rrggbb` value that
- * `<input type="color">` will accept  it silently falls back to black for
+ * `<input type="color">` will accept — it silently falls back to black for
  * anything else, which looks like a bug to the user. */
 function toHexColor(raw: unknown): string {
   if (typeof raw === 'string' && /^#[0-9a-fA-F]{6}$/.test(raw)) return raw;
@@ -65,6 +70,22 @@ function sizeBounds(maxDim: number | null) {
     max: Number((dim * 0.06).toPrecision(2)),
     step: Number((dim * 0.001).toPrecision(2)),
     fallback: Number((dim * 0.012).toPrecision(2)),
+  };
+}
+
+/**
+ * Slider bounds for a location's "zoom" (camera view distance when the
+ * viewer flies here). Same size-relative approach as `sizeBounds`, just
+ * scaled for "how far back should the camera sit" instead of "how big is a
+ * marker".
+ */
+function zoomDistanceBounds(maxDim: number | null) {
+  const dim = maxDim && maxDim > 0 ? maxDim : 5;
+  return {
+    min: Number((dim * 0.02).toPrecision(2)),
+    max: Number((dim * 2.5).toPrecision(2)),
+    step: Number((dim * 0.01).toPrecision(2)),
+    fallback: Number((dim * 0.3).toPrecision(2)),
   };
 }
 
@@ -108,13 +129,13 @@ const buttonStyle: React.CSSProperties = {
  * halves of the scene workflow:
  *
  *  1. uploading a scene .json file, and
- *  2. editing the sensors in it  position (by clicking the model in the
+ *  2. editing the sensors in it — position (by clicking the model in the
  *     viewer), marker colour, and marker size.
  *
  * Everything is stored back into the *same* form-data field as the raw JSON
  * text, so edits round-trip through Superset's normal control machinery and
  * the field's `renderTrigger` re-renders the viewer live. Position picking
- * needs a click inside the chart canvas, which is a different React tree 
+ * needs a click inside the chart canvas, which is a different React tree —
  * see `sensorEditorBridge` for that hand-off.
  */
 export default function SensorSceneControl({
@@ -129,6 +150,8 @@ export default function SensorSceneControl({
   const [expandedId, setExpandedId] = useState<string | null>(null);
   const [expandedModel, setExpandedModel] = useState<string | null>(null);
   const [pickingId, setPickingId] = useState<string | null>(null);
+  const [expandedLocationId, setExpandedLocationId] = useState<string | null>(null);
+  const [pickingLocationId, setPickingLocationId] = useState<string | null>(null);
   const [modelMaxDim, setModelMaxDim] = useState<number | null>(null);
   const [copyFeedback, setCopyFeedback] = useState<string>('');
   // Sensors the viewer found in its dataset query, published over the bridge.
@@ -258,16 +281,47 @@ export default function SensorSceneControl({
     [applyScene],
   );
 
-  // Apply positions clicked in the viewer. The target device comes in with
-  // the event, so there's no stale-closure hazard.
+  /**
+   * Upsert, not update, for a location bookmark too: a location that's only
+   * ever been typed in (never picked) still needs to exist the moment its
+   * name field is touched.
+   */
+  const updateLocation = useCallback(
+    (id: string, patch: Partial<Omit<LocationPoi, 'id'>>) => {
+      const current: SceneData = sceneRef.current ?? { devices: [] };
+      const list = current.pois ?? [];
+      const existing = list.find(p => p.id === id);
+      const nextList = existing
+        ? list.map(p => (p.id === id ? { ...p, ...patch } : p))
+        : [
+            ...list,
+            {
+              id,
+              name: 'New location',
+              position: [0, 0, 0] as Position3,
+              ...patch,
+            },
+          ];
+      applyScene({ ...current, pois: nextList });
+    },
+    [applyScene],
+  );
+
+  // Apply positions clicked in the viewer. The target (device or location)
+  // comes in with the event, so there's no stale-closure hazard.
   useEffect(
     () =>
-      subscribePick((deviceId: string, position: Position3) => {
-        updateDevice(deviceId, { position });
+      subscribePick((kind, id, position) => {
+        if (kind === 'location') {
+          updateLocation(id, { position });
+          setPickingLocationId(null);
+        } else {
+          updateDevice(id, { position });
+          setPickingId(null);
+        }
         setPickTarget(null);
-        setPickingId(null);
       }),
-    [updateDevice],
+    [updateDevice, updateLocation],
   );
 
   const handleFile = useCallback(
@@ -286,6 +340,8 @@ export default function SensorSceneControl({
           setExpandedId(null);
           setExpandedModel(null);
           setPickingId(null);
+          setExpandedLocationId(null);
+          setPickingLocationId(null);
           setPickTarget(null);
           sceneRef.current = parsed as SceneData;
           setScene(parsed as SceneData);
@@ -349,12 +405,12 @@ export default function SensorSceneControl({
       setPickTarget(null);
     } else {
       setPickingId(deviceId);
-      setPickTarget(deviceId);
+      setPickTarget({ kind: 'device', id: deviceId });
     }
   }
 
   /**
-   * Every sensor under one model shares a marker colour & size  there's no
+   * Every sensor under one model shares a marker colour & size — there's no
    * per-sensor styling control any more, only this. Upserts the patch onto
    * every device in the group (dataset-sourced sensors that have never been
    * placed get created here too, same as `updateDevice`).
@@ -379,6 +435,20 @@ export default function SensorSceneControl({
     applyScene({ ...current, devices: Array.from(byId.values()) });
   }
 
+  /**
+   * The 3D shape used for every sensor under one model — stored once per
+   * model key, not per device (unlike colour/size, there's no per-sensor
+   * data to preserve here, so there's no reason to touch every device row
+   * just to change a shape).
+   */
+  function updateModelShape(modelKey: string, shape: MarkerShapeId) {
+    const current: SceneData = sceneRef.current ?? { devices: [] };
+    applyScene({
+      ...current,
+      modelShapes: { ...(current.modelShapes ?? {}), [modelKey]: shape },
+    });
+  }
+
   function clearPlacement(deviceId: string) {
     // `undefined` rather than a delete: JSON.stringify drops the key, so the
     // sensor goes back to being unplaced.
@@ -389,8 +459,43 @@ export default function SensorSceneControl({
     }
   }
 
+  const locations: LocationPoi[] = scene?.pois ?? [];
+
+  function toggleLocationPick(id: string) {
+    if (pickingLocationId === id) {
+      setPickingLocationId(null);
+      setPickTarget(null);
+    } else {
+      setPickingLocationId(id);
+      setPickTarget({ kind: 'location', id });
+    }
+  }
+
+  function addLocation() {
+    const current: SceneData = sceneRef.current ?? { devices: [] };
+    const list = current.pois ?? [];
+    const id = `loc-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`;
+    const next: LocationPoi = {
+      id,
+      name: `Location ${list.length + 1}`,
+      position: [0, 0, 0],
+    };
+    applyScene({ ...current, pois: [...list, next] });
+    setExpandedLocationId(id);
+  }
+
+  function removeLocation(id: string) {
+    const current: SceneData = sceneRef.current ?? { devices: [] };
+    applyScene({ ...current, pois: (current.pois ?? []).filter(p => p.id !== id) });
+    if (pickingLocationId === id) {
+      setPickingLocationId(null);
+      setPickTarget(null);
+    }
+    if (expandedLocationId === id) setExpandedLocationId(null);
+  }
+
   function copyJson() {
-    // In dataset mode, export the merged view  roster names plus placements 
+    // In dataset mode, export the merged view — roster names plus placements —
     // so the result is a portable scene file that works in JSON mode too. In
     // file mode, export exactly what's stored so the round-trip is lossless.
     const payload: SceneData = fromDataset
@@ -402,7 +507,7 @@ export default function SensorSceneControl({
         setCopyFeedback('Copied!');
         window.setTimeout(() => setCopyFeedback(''), 2000);
       })
-      .catch(() => setCopyFeedback('Copy failed  check clipboard permissions.'));
+      .catch(() => setCopyFeedback('Copy failed — check clipboard permissions.'));
   }
 
   return (
@@ -446,7 +551,7 @@ export default function SensorSceneControl({
         <div style={{ fontSize: 11, color: '#8e94a1', marginTop: 8 }}>
           No sensors yet. Either upload a scene file above, or set Sensor Source
           to &ldquo;Dataset rows&rdquo; and map a Sensor ID Column in the Data
-          tab  the sensors will then be listed here to place on the model.
+          tab — the sensors will then be listed here to place on the model.
         </div>
       )}
 
@@ -535,7 +640,7 @@ export default function SensorSceneControl({
                     {groupPlaced}/{group.sensors.length} placed
                   </span>
                   <span style={{ color: '#8e94a1', fontSize: 10, flexShrink: 0 }}>
-                    {groupExpanded ? '�' : '�'}
+                    {groupExpanded ? '▲' : '▼'}
                   </span>
                 </button>
 
@@ -603,6 +708,28 @@ export default function SensorSceneControl({
                       />
                     </div>
 
+                    <div style={rowStyle}>
+                      <span style={fieldLabelStyle}>Shape</span>
+                      <select
+                        value={scene?.modelShapes?.[group.key] ?? DEFAULT_MARKER_SHAPE}
+                        onChange={e =>
+                          updateModelShape(group.key, e.target.value as MarkerShapeId)
+                        }
+                        style={{
+                          ...numberInputStyle,
+                          flex: 1,
+                          minWidth: 0,
+                          cursor: 'pointer',
+                        }}
+                      >
+                        {MARKER_SHAPE_OPTIONS.map(opt => (
+                          <option key={opt.id} value={opt.id}>
+                            {opt.label}
+                          </option>
+                        ))}
+                      </select>
+                    </div>
+
                     <div
                       style={{
                         fontSize: 10,
@@ -610,7 +737,7 @@ export default function SensorSceneControl({
                         margin: '2px 0 10px',
                       }}
                     >
-                      Colour &amp; size apply to all {group.sensors.length} sensor
+                      Colour, size &amp; shape apply to all {group.sensors.length} sensor
                       {group.sensors.length === 1 ? '' : 's'} under {group.label}.
                     </div>
 
@@ -703,7 +830,7 @@ export default function SensorSceneControl({
                               </span>
                             )}
                             <span style={{ color: '#8e94a1', fontSize: 10 }}>
-                              {expanded ? '�' : '�'}
+                              {expanded ? '▲' : '▼'}
                             </span>
                           </button>
 
@@ -742,7 +869,7 @@ export default function SensorSceneControl({
                                 }}
                               >
                                 {picking
-                                  ? 'Click the model in the viewer& (cancel)'
+                                  ? 'Click the model in the viewer… (cancel)'
                                   : placed
                                     ? 'Re-pick position on model'
                                     : 'Pick position on model'}
@@ -767,8 +894,199 @@ export default function SensorSceneControl({
               </div>
             );
           })}
+        </div>
+      )}
 
-          <button type="button" onClick={copyJson} style={{ ...buttonStyle, marginTop: 6 }}>
+      <div style={{ marginTop: 16 }}>
+        <div
+          style={{
+            fontWeight: 600,
+            fontSize: 12,
+            marginBottom: 6,
+            display: 'flex',
+            alignItems: 'center',
+            gap: 6,
+          }}
+        >
+          Locations
+          <span style={{ color: '#8e94a1', fontWeight: 400 }}>
+            ({locations.length})
+          </span>
+        </div>
+        <div style={{ fontSize: 11, color: '#8e94a1', marginBottom: 6 }}>
+          Named camera bookmarks. Pick a spot on the model or type coordinates,
+          then jump to it from the Location filter above the viewer.
+        </div>
+
+        {locations.length === 0 && (
+          <div style={{ fontSize: 11, color: '#8e94a1', marginBottom: 8 }}>
+            No locations yet.
+          </div>
+        )}
+
+        {locations.map(loc => {
+          const expanded = loc.id === expandedLocationId;
+          const picking = loc.id === pickingLocationId;
+          const zBounds = zoomDistanceBounds(modelMaxDim);
+          const zoom = loc.zoomDistance ?? zBounds.fallback;
+          const position: Position3 = loc.position || [0, 0, 0];
+
+          return (
+            <div
+              key={loc.id}
+              style={{
+                border: '1px solid #e2e8f0',
+                borderRadius: 4,
+                marginBottom: 6,
+                overflow: 'hidden',
+                background: expanded ? '#f8fafc' : 'white',
+              }}
+            >
+              <button
+                type="button"
+                onClick={() => setExpandedLocationId(expanded ? null : loc.id)}
+                style={{
+                  width: '100%',
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: 6,
+                  padding: '6px 8px',
+                  border: 'none',
+                  background: 'transparent',
+                  cursor: 'pointer',
+                  fontSize: 12,
+                  textAlign: 'left',
+                  color: '#323b48',
+                }}
+              >
+                <span
+                  style={{
+                    width: 10,
+                    height: 10,
+                    borderRadius: '50%',
+                    background: '#f59e0b',
+                    border: '1px solid rgba(15,23,42,0.2)',
+                    flexShrink: 0,
+                  }}
+                />
+                <span
+                  style={{
+                    overflow: 'hidden',
+                    textOverflow: 'ellipsis',
+                    whiteSpace: 'nowrap',
+                    flex: 1,
+                  }}
+                >
+                  {loc.name || 'Untitled location'}
+                </span>
+                <span style={{ color: '#8e94a1', fontSize: 10 }}>
+                  {expanded ? '▲' : '▼'}
+                </span>
+              </button>
+
+              {expanded && (
+                <div style={{ padding: '8px', borderTop: '1px solid #e2e8f0' }}>
+                  <div style={rowStyle}>
+                    <span style={fieldLabelStyle}>Name</span>
+                    <input
+                      type="text"
+                      value={loc.name}
+                      onChange={e => updateLocation(loc.id, { name: e.target.value })}
+                      style={{ ...numberInputStyle, flex: 1 }}
+                    />
+                  </div>
+
+                  <div style={rowStyle}>
+                    <span style={fieldLabelStyle}>Position</span>
+                    <div style={{ display: 'flex', gap: 4, flex: 1, minWidth: 0 }}>
+                      {[0, 1, 2].map(axis => (
+                        <input
+                          // eslint-disable-next-line react/no-array-index-key
+                          key={axis}
+                          type="number"
+                          step={0.01}
+                          value={position[axis] ?? 0}
+                          onChange={e => {
+                            const next: Position3 = [...position] as Position3;
+                            next[axis] = Number(e.target.value) || 0;
+                            updateLocation(loc.id, { position: next });
+                          }}
+                          style={numberInputStyle}
+                        />
+                      ))}
+                    </div>
+                  </div>
+
+                  <div style={rowStyle}>
+                    <span style={fieldLabelStyle}>Zoom</span>
+                    <input
+                      type="range"
+                      min={zBounds.min}
+                      max={zBounds.max}
+                      step={zBounds.step}
+                      value={zoom}
+                      onChange={e =>
+                        updateLocation(loc.id, { zoomDistance: Number(e.target.value) })
+                      }
+                      style={{ flex: 1, minWidth: 0 }}
+                    />
+                    <input
+                      type="number"
+                      min={0}
+                      step={zBounds.step}
+                      value={zoom}
+                      onChange={e =>
+                        updateLocation(loc.id, {
+                          zoomDistance: Number(e.target.value) || 0,
+                        })
+                      }
+                      style={{ ...numberInputStyle, width: 60, flexShrink: 0 }}
+                    />
+                  </div>
+                  <div style={{ fontSize: 10, color: '#8e94a1', margin: '2px 0 8px' }}>
+                    Lower = camera sits closer when jumping here.
+                  </div>
+
+                  <button
+                    type="button"
+                    onClick={() => toggleLocationPick(loc.id)}
+                    style={{
+                      ...buttonStyle,
+                      border: 'none',
+                      color: 'white',
+                      background: picking ? '#dc2626' : '#2563eb',
+                    }}
+                  >
+                    {picking
+                      ? 'Click the model in the viewer… (cancel)'
+                      : 'Pick position on model'}
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={() => removeLocation(loc.id)}
+                    style={{ ...buttonStyle, marginTop: 6, color: '#b91c1c' }}
+                  >
+                    Remove location
+                  </button>
+                </div>
+              )}
+            </div>
+          );
+        })}
+
+        <button type="button" onClick={addLocation} style={buttonStyle}>
+          + Add location
+        </button>
+      </div>
+
+      {(devices.length > 0 || locations.length > 0) && (
+        <>
+          <button
+            type="button"
+            onClick={copyJson}
+            style={{ ...buttonStyle, marginTop: 12 }}
+          >
             Copy scene JSON
           </button>
           {copyFeedback && (
@@ -783,7 +1101,7 @@ export default function SensorSceneControl({
               {copyFeedback}
             </div>
           )}
-        </div>
+        </>
       )}
     </div>
   );
