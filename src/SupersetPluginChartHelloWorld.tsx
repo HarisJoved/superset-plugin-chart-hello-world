@@ -22,6 +22,7 @@ import * as THREE from 'three';
 import { RoomEnvironment } from 'three/examples/jsm/environments/RoomEnvironment.js';
 // eslint-disable-next-line import/extensions
 import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
+import { MeshoptDecoder } from 'three/examples/jsm/libs/meshopt_decoder.module.js';
 // eslint-disable-next-line import/extensions
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
 import {
@@ -233,6 +234,7 @@ export default function SupersetPluginChartHelloWorld(
   // load use the *current* cameraZoom rather than the value captured when
   // the effect was registered.
   const frameCameraRef = useRef<() => void>(() => {});
+  const focusOnDeviceRef = useRef<(device: DeviceDatum) => void>(() => {});
 
   const [error, setError] = useState<string>('');
   const [modelError, setModelError] = useState<string>('');
@@ -247,6 +249,8 @@ export default function SupersetPluginChartHelloWorld(
   // Runtime filters — local to the viewer, not persisted with the chart.
   const [modelFilter, setModelFilter] = useState<string>('__all__');
   const [locationFilter, setLocationFilter] = useState<string>('');
+  const [searchQuery, setSearchQuery] = useState('');
+  const [searchOpen, setSearchOpen] = useState(false);
 
   const fontSizes: Record<string, string> = {
     xxs: '12px',
@@ -363,6 +367,27 @@ export default function SupersetPluginChartHelloWorld(
   const effectiveLocationFilter = pois.some(p => p.id === locationFilter)
     ? locationFilter
     : '';
+  // Only sensors with a position can be zoomed to, so search only looks at
+  // `placedDevices` — an unplaced sensor wouldn't have anywhere to fly.
+  const searchMatches = (() => {
+    const q = searchQuery.trim().toLowerCase();
+    if (!q) return [];
+    return placedDevices
+      .filter(
+        d =>
+          displayName(d).toLowerCase().includes(q) ||
+          d.deviceId.toLowerCase().includes(q),
+      )
+      .slice(0, 8);
+  })();
+
+  function selectSearchResult(device: DeviceDatum) {
+    setSelectedDevice(device);
+    setShowGraph(false);
+    setSearchQuery('');
+    setSearchOpen(false);
+    focusOnDevice(device);
+  }
   const modelShapes = sceneData?.modelShapes;
   // Only used to decide whether the marker-rebuild effect needs to run —
   // modelShapes is a fresh object reference on every scene update, so a
@@ -508,24 +533,15 @@ export default function SupersetPluginChartHelloWorld(
   frameCameraRef.current = frameCamera;
 
   /**
-   * Points the camera at a saved location bookmark instead of fitting the
-   * whole model — same three-quarter viewing angle as `frameCamera`, just
-   * centred on the bookmark's point at its own fixed distance rather than
-   * one computed to fit a bounding box. Called directly from the Location
-   * filter's onChange, so (unlike frameCamera) it doesn't need a ref: there
-   * is no later effect that needs to call a "current" version of it.
+   * Points the camera at `center` from `distance` away, along the same
+   * three-quarter angle `frameCamera` uses for the whole-model fit. Shared
+   * by `flyToLocation` and `focusOnDevice`, which only differ in how they
+   * compute `center`/`distance`.
    */
-  function flyToLocation(loc: LocationPoi) {
+  function pointCameraAt(center: THREE.Vector3, distance: number) {
     const camera = cameraRef.current;
     const controls = controlsRef.current;
     if (!camera || !controls) return;
-    const [x, y, z] = loc.position || [0, 0, 0];
-    const center = new THREE.Vector3(x || 0, y || 0, z || 0);
-    const fallbackDistance = (modelWorldSize ?? FALLBACK_WORLD_SIZE) * 0.3;
-    const distance =
-      typeof loc.zoomDistance === 'number' && loc.zoomDistance > 0
-        ? loc.zoomDistance
-        : fallbackDistance;
 
     const direction = new THREE.Vector3(1, 0.55, 1).normalize();
     camera.position.copy(center).add(direction.clone().multiplyScalar(distance));
@@ -540,6 +556,50 @@ export default function SupersetPluginChartHelloWorld(
     controls.maxDistance = Math.max(controls.maxDistance, distance * 20);
     controls.update();
   }
+
+  /**
+   * Points the camera at a saved location bookmark instead of fitting the
+   * whole model — centred on the bookmark's point at its own fixed distance
+   * rather than one computed to fit a bounding box. Called directly from
+   * the Location filter's onChange, so (unlike frameCamera) it doesn't need
+   * a ref: there is no later effect that needs to call a "current" version
+   * of it.
+   */
+  function flyToLocation(loc: LocationPoi) {
+    const [x, y, z] = loc.position || [0, 0, 0];
+    const center = new THREE.Vector3(x || 0, y || 0, z || 0);
+    const fallbackDistance = (modelWorldSize ?? FALLBACK_WORLD_SIZE) * 0.3;
+    const distance =
+      typeof loc.zoomDistance === 'number' && loc.zoomDistance > 0
+        ? loc.zoomDistance
+        : fallbackDistance;
+    pointCameraAt(center, distance);
+  }
+
+  /**
+   * Zooms in on one sensor for a focused view — used both when a marker is
+   * clicked and when a search result is picked. Distance is proportional to
+   * the marker's own size (or the model's, if the marker uses the default),
+   * so a "focused" view stays a close-up regardless of model scale.
+   */
+  function focusOnDevice(device: DeviceDatum) {
+    const [x, y, z] = device.position || [0, 0, 0];
+    const center = new THREE.Vector3(x || 0, y || 0, z || 0);
+    const worldSize = modelWorldSize ?? FALLBACK_WORLD_SIZE;
+    const radius =
+      typeof device.markerSize === 'number' && device.markerSize > 0
+        ? device.markerSize
+        : worldSize * 0.012;
+    const distance = Math.max(radius * 10, worldSize * 0.06);
+    pointCameraAt(center, distance);
+  }
+  // The click handler below lives in an effect keyed on `pickTarget`, not on
+  // every render, so it can't just close over `focusOnDevice` directly (that
+  // would freeze it to whatever `modelWorldSize` was when the effect last
+  // ran). Mirroring it into a ref — refreshed every render, same as
+  // `frameCameraRef` — keeps it current without re-subscribing the click
+  // listener on every model-size change.
+  focusOnDeviceRef.current = focusOnDevice;
 
   function raycastMarkersAt(clientX: number, clientY: number): THREE.Intersection[] {
     const renderer = rendererRef.current;
@@ -677,6 +737,7 @@ export default function SupersetPluginChartHelloWorld(
         const device = hits[0].object.userData.device as DeviceDatum | undefined;
         setSelectedDevice(device || null);
         setShowGraph(false);
+        if (device) focusOnDeviceRef.current(device);
       } else {
         setSelectedDevice(null);
         setShowGraph(false);
@@ -732,6 +793,13 @@ export default function SupersetPluginChartHelloWorld(
 
     let cancelled = false;
     const loader = new GLTFLoader();
+    // Some GLB exports (e.g. compressed with gltfpack) use the EXT_meshopt_compression
+    // extension for their buffer views. Without a decoder wired in, GLTFLoader
+    // throws "setMeshoptDecoder must be called before loading compressed
+    // files" the moment it hits one — this has nothing to do with the URL or
+    // CORS, only with whether *this* particular file happens to use meshopt
+    // compression.
+    loader.setMeshoptDecoder(MeshoptDecoder);
     loader.load(
       modelUrl,
       gltf => {
@@ -922,11 +990,102 @@ export default function SupersetPluginChartHelloWorld(
         {headerText || '3D Device Viewer'}
       </div>
 
-      {(modelOptions.length > 1 || pois.length > 0) && (
+      {placedDevices.length > 0 && (
         <div
           style={{
             position: 'absolute',
             top: 48,
+            left: 16,
+            zIndex: 3,
+            width: 220,
+          }}
+        >
+          <input
+            type="text"
+            value={searchQuery}
+            onChange={e => {
+              setSearchQuery(e.target.value);
+              setSearchOpen(true);
+            }}
+            onFocus={() => setSearchOpen(true)}
+            onBlur={() => {
+              // Delay so a click on a result registers before the dropdown
+              // unmounts out from under it.
+              window.setTimeout(() => setSearchOpen(false), 150);
+            }}
+            onKeyDown={e => {
+              if (e.key === 'Enter' && searchMatches.length > 0) {
+                selectSearchResult(searchMatches[0]);
+              } else if (e.key === 'Escape') {
+                setSearchQuery('');
+                setSearchOpen(false);
+              }
+            }}
+            placeholder="Search sensors…"
+            aria-label="Search sensors"
+            style={{ ...filterSelectStyle, width: '100%', cursor: 'text' }}
+          />
+          {searchOpen && searchQuery.trim() && (
+            <div
+              style={{
+                position: 'relative',
+                zIndex: 6,
+                marginTop: 4,
+                background: 'rgba(255,255,255,0.98)',
+                border: '1px solid #cbd5e1',
+                borderRadius: 6,
+                boxShadow: '0 8px 20px rgba(15,23,42,0.18)',
+                maxHeight: 220,
+                overflowY: 'auto',
+              }}
+            >
+              {searchMatches.length === 0 && (
+                <div style={{ padding: '8px 10px', fontSize: 11, color: '#94a3b8' }}>
+                  No sensors match "{searchQuery.trim()}"
+                </div>
+              )}
+              {searchMatches.map(device => {
+                const key = deviceModelKey(device);
+                return (
+                  <button
+                    key={device.deviceId}
+                    type="button"
+                    // Mouse down (not click) fires before the input's blur,
+                    // so the result is still in the DOM when this runs.
+                    onMouseDown={e => {
+                      e.preventDefault();
+                      selectSearchResult(device);
+                    }}
+                    style={{
+                      display: 'block',
+                      width: '100%',
+                      textAlign: 'left',
+                      padding: '7px 10px',
+                      border: 'none',
+                      borderBottom: '1px solid #f1f5f9',
+                      background: 'transparent',
+                      cursor: 'pointer',
+                      fontSize: 12,
+                      color: '#0f172a',
+                    }}
+                  >
+                    <span style={{ fontWeight: 600 }}>{displayName(device)}</span>
+                    {key !== OTHER_MODEL_KEY && (
+                      <span style={{ color: '#94a3b8', fontSize: 11 }}> · {key}</span>
+                    )}
+                  </button>
+                );
+              })}
+            </div>
+          )}
+        </div>
+      )}
+
+      {(modelOptions.length > 1 || pois.length > 0) && (
+        <div
+          style={{
+            position: 'absolute',
+            top: placedDevices.length > 0 ? 84 : 48,
             left: 16,
             zIndex: 3,
             display: 'flex',
