@@ -44,25 +44,14 @@ import {
   subscribeState,
 } from './sensorEditorBridge';
 import { SensorDetailPanel, SensorGraphModal } from './SensorPanels';
-import { parseSensorId, resolveNgsiId } from './api';
+import {
+  OTHER_MODEL_KEY,
+  deviceModelKey,
+  sensorDisplayName as displayName,
+} from './api';
 import { buildMarkerShape } from './markerShapes';
-
-/** "Aelita2S-002" instead of "urn:ngsi-v2:Coolon-Light:Aelita2S-002" — used
- * anywhere a sensor's name is rendered in the 3D scene or its overlays. */
-function displayName(device: DeviceDatum): string {
-  const parsed = parseSensorId(resolveNgsiId(device));
-  return parsed.sensorName || device.deviceName || device.deviceId;
-}
-
-/** Bucket key for the model filter — sensors whose id doesn't parse as a
- * full NGSI urn (so we can't tell which model they belong to) share this
- * one "Other sensors" option, same convention as the placement editor. */
-const OTHER_MODEL_KEY = '__other_sensors__';
-
-function deviceModelKey(device: DeviceDatum): string {
-  const parsed = parseSensorId(resolveNgsiId(device));
-  return parsed.isNgsiUrn && parsed.modelName ? parsed.modelName : OTHER_MODEL_KEY;
-}
+import { DevicesPanel } from './DevicesPanel';
+import { AlertsPanel } from './AlertsPanel';
 
 /** Fallback world size used to derive marker/label scale before a model has
  * loaded (or when the scene has no model at all). */
@@ -251,6 +240,8 @@ export default function SupersetPluginChartHelloWorld(
   const [locationFilter, setLocationFilter] = useState<string>('');
   const [searchQuery, setSearchQuery] = useState('');
   const [searchOpen, setSearchOpen] = useState(false);
+  const [devicesPanelOpen, setDevicesPanelOpen] = useState(false);
+  const [alertsPanelOpen, setAlertsPanelOpen] = useState(false);
 
   const fontSizes: Record<string, string> = {
     xxs: '12px',
@@ -994,8 +985,8 @@ export default function SupersetPluginChartHelloWorld(
         <div
           style={{
             position: 'absolute',
-            top: 48,
-            left: 16,
+            top: 12,
+            right: 16,
             zIndex: 3,
             width: 220,
           }}
@@ -1085,7 +1076,7 @@ export default function SupersetPluginChartHelloWorld(
         <div
           style={{
             position: 'absolute',
-            top: placedDevices.length > 0 ? 84 : 48,
+            top: 48,
             left: 16,
             zIndex: 3,
             display: 'flex',
@@ -1271,6 +1262,58 @@ export default function SupersetPluginChartHelloWorld(
           Reset view
         </button>
       )}
+
+      <div
+        style={{
+          position: 'absolute',
+          bottom: 12,
+          left: 16,
+          zIndex: 3,
+          display: 'flex',
+          gap: 8,
+        }}
+      >
+        {devices.length > 0 && (
+          <button
+            type="button"
+            onClick={() => setDevicesPanelOpen(true)}
+            style={{
+              padding: '6px 12px',
+              fontSize: 11,
+              fontWeight: 700,
+              color: 'white',
+              background: '#2563eb',
+              border: 'none',
+              borderRadius: 6,
+              cursor: 'pointer',
+            }}
+          >
+            ☰ Devices ({devices.length})
+          </button>
+        )}
+        <button
+          type="button"
+          onClick={() => setAlertsPanelOpen(true)}
+          style={{
+            padding: '6px 12px',
+            fontSize: 11,
+            fontWeight: 700,
+            color: 'white',
+            background: '#dc2626',
+            border: 'none',
+            borderRadius: 6,
+            cursor: 'pointer',
+          }}
+        >
+          ⚠ Alerts
+        </button>
+      </div>
+
+      {devicesPanelOpen && (
+        <DevicesPanel devices={devices} onClose={() => setDevicesPanelOpen(false)} />
+      )}
+
+      {alertsPanelOpen && <AlertsPanel onClose={() => setAlertsPanelOpen(false)} />}
 
       <div ref={containerRef} style={{ width: '100%', height: '100%' }} />
     </div>

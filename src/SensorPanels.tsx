@@ -67,7 +67,7 @@ export function useLatestDeviceData(deviceId: string | undefined) {
   return { data, loading, error };
 }
 
-function formatLastUpdated(iso?: string): string {
+export function formatLastUpdated(iso?: string): string {
   if (!iso) return '—';
   const d = new Date(iso);
   if (Number.isNaN(d.getTime())) return iso;
@@ -101,11 +101,15 @@ export function SensorDetailPanel({ device, onClose, onViewGraph }: DetailPanelP
     <div
       style={{
         position: 'absolute',
-        top: 12,
+        // Clears the sensor-search box, which sits in this same corner
+        // (top: 12) whenever there's at least one placed device — which is
+        // always true here, since only placed devices get a marker to
+        // click or a search result to select in the first place.
+        top: 56,
         right: 16,
         zIndex: 3,
         width: 280,
-        maxHeight: '88%',
+        maxHeight: '82%',
         overflowY: 'auto',
         background: 'rgba(255,255,255,0.98)',
         border: '1px solid #e2e8f0',
@@ -268,7 +272,7 @@ export function SensorDetailPanel({ device, onClose, onViewGraph }: DetailPanelP
 /* Small dependency-free line/area chart for one attribute's history. */
 /* ------------------------------------------------------------------ */
 
-function formatTick(ms: number): string {
+export function formatTick(ms: number): string {
   const d = new Date(ms);
   const mm = String(d.getMonth() + 1).padStart(2, '0');
   const dd = String(d.getDate()).padStart(2, '0');
@@ -277,7 +281,7 @@ function formatTick(ms: number): string {
   return `${mm}/${dd} ${hh}:${min}`;
 }
 
-function AttributeAreaChart({ points }: { points: HistoryPoint[] }) {
+export function AttributeAreaChart({ points }: { points: HistoryPoint[] }) {
   const width = 780;
   const height = 190;
   const padL = 48;

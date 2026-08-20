@@ -316,3 +316,35 @@ export function formatAttrValue(value: unknown): string {
   if (typeof value === 'object') return JSON.stringify(value);
   return String(value);
 }
+
+/** Bucket key for sensors whose id doesn't parse as a full NGSI urn (so we
+ * can't tell which model they belong to). Shared by every place in the UI
+ * that groups or filters sensors by model — the placement editor, the
+ * viewer's model filter, and the Devices table's model chips all need the
+ * exact same bucketing or "Coolon-Light" in one place and "Other sensors"
+ * in another for the same sensor. */
+export const OTHER_MODEL_KEY = '__other_sensors__';
+
+export function deviceModelKey(device: {
+  deviceId: string;
+  deviceName?: unknown;
+  [key: string]: unknown;
+}): string {
+  const parsed = parseSensorId(resolveNgsiId(device));
+  return parsed.isNgsiUrn && parsed.modelName ? parsed.modelName : OTHER_MODEL_KEY;
+}
+
+/** "Aelita2S-002" instead of "urn:ngsi-v2:Coolon-Light:Aelita2S-002" — the
+ * one place every sensor-name display in the UI should go through. */
+export function sensorDisplayName(device: {
+  deviceId: string;
+  deviceName?: unknown;
+  [key: string]: unknown;
+}): string {
+  const parsed = parseSensorId(resolveNgsiId(device));
+  return (
+    parsed.sensorName ||
+    (typeof device.deviceName === 'string' ? device.deviceName : '') ||
+    device.deviceId
+  );
+}
