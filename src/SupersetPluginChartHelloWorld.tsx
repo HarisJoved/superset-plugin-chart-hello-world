@@ -131,12 +131,36 @@ function makeLabelSprite(text: string, worldWidth: number): THREE.Sprite {
  * instead of a fixed 0.03 that is invisible on a large model and a boulder
  * on a small one. Explicit sizes from the editor are always respected.
  */
+/** One marker's per-frame animation state — a gentle idle bob applied to
+ * every marker regardless of shape, plus whatever shape-specific `update`
+ * the marker itself defines (dust drift, noise pulses, light glow). */
+interface MarkerAnimEntry {
+  group: THREE.Group;
+  baseY: number;
+  /** Per-marker phase offset so markers don't all bob in lockstep. */
+  phase: number;
+  bobAmplitude: number;
+  update?: (elapsed: number, isNight: boolean) => void;
+}
+
+/** Cheap deterministic hash of a device id into a 0..2π phase, so the same
+ * device always bobs with the same offset across rebuilds (no visible
+ * "reset" when markers are recreated after an edit). */
+function phaseFromId(id: string): number {
+  let h = 0;
+  for (let i = 0; i < id.length; i += 1) {
+    h = (h * 31 + id.charCodeAt(i)) & 0xffffffff;
+  }
+  return (Math.abs(h) % 1000) / 1000 * Math.PI * 2;
+}
+
 function buildDeviceGroup(
   devices: DeviceDatum[],
   markerMeshesOut: THREE.Mesh[],
   worldSize: number,
   showLabels: boolean,
   modelShapes: Record<string, string> | undefined,
+  markerAnimOut: MarkerAnimEntry[],
 ): THREE.Group {
   const group = new THREE.Group();
   const defaultRadius = worldSize * 0.012;
@@ -151,18 +175,26 @@ function buildDeviceGroup(
 
     const color = new THREE.Color(markerColorOf(device));
     const shapeId = modelShapes?.[deviceModelKey(device)];
-    const { group: markerGroup, coreMesh } = buildMarkerShape(shapeId, color, radius);
+    const { group: markerGroup, coreMesh, update } = buildMarkerShape(shapeId, color, radius);
     markerGroup.position.copy(pos);
     coreMesh.userData.device = device;
     group.add(markerGroup);
     markerMeshesOut.push(coreMesh);
+    markerAnimOut.push({
+      group: markerGroup,
+      baseY: pos.y,
+      phase: phaseFromId(device.deviceId),
+      bobAmplitude: radius * 0.18,
+      update,
+    });
 
     if (showLabels && (device.deviceName || device.deviceId)) {
       const label = makeLabelSprite(displayName(device), worldSize * 0.18);
-      label.position
-        .copy(pos)
-        .add(new THREE.Vector3(0, radius + worldSize * 0.03, 0));
-      group.add(label);
+      // Local offset, not a world position — parented to markerGroup so the
+      // label rides along with the marker's idle bob instead of floating
+      // detached from it.
+      label.position.set(0, radius + worldSize * 0.03, 0);
+      markerGroup.add(label);
     }
   });
 
@@ -217,6 +249,17 @@ export default function SupersetPluginChartHelloWorld(
   const modelGroupRef = useRef<THREE.Group | null>(null);
   const deviceGroupRef = useRef<THREE.Group | null>(null);
   const markerMeshesRef = useRef<THREE.Mesh[]>([]);
+  const markerAnimRef = useRef<MarkerAnimEntry[]>([]);
+  // Plays back animation clips embedded in the loaded GLB (conveyor belts,
+  // fans, anything the model author baked in) — previously never wired up,
+  // which is why the model looked frozen even when it had real animations.
+  const mixerRef = useRef<THREE.AnimationMixer | null>(null);
+  const clockRef = useRef<THREE.Clock>(new THREE.Clock());
+  const ambientLightRef = useRef<THREE.AmbientLight | null>(null);
+  const directionalLightRef = useRef<THREE.DirectionalLight | null>(null);
+  // Mirrors `isNight` state into a ref so the mount-only animate loop can
+  // read the current value without re-subscribing every toggle.
+  const isNightRef = useRef(false);
   const raycasterRef = useRef<THREE.Raycaster>(new THREE.Raycaster());
   const animationFrameRef = useRef<number>(0);
   // Always-fresh reference to frameCamera, so effects that fire on model
@@ -242,6 +285,7 @@ export default function SupersetPluginChartHelloWorld(
   const [searchOpen, setSearchOpen] = useState(false);
   const [devicesPanelOpen, setDevicesPanelOpen] = useState(false);
   const [alertsPanelOpen, setAlertsPanelOpen] = useState(false);
+  const [isNight, setIsNight] = useState(false);
 
   const fontSizes: Record<string, string> = {
     xxs: '12px',
@@ -666,16 +710,32 @@ export default function SupersetPluginChartHelloWorld(
     ).texture;
     pmremGenerator.dispose();
 
-    scene.add(new THREE.AmbientLight(0xffffff, 0.7));
+    const ambient = new THREE.AmbientLight(0xffffff, 0.7);
+    scene.add(ambient);
+    ambientLightRef.current = ambient;
     const directional = new THREE.DirectionalLight(0xffffff, 0.9);
     directional.position.set(5, 8, 5);
     scene.add(directional);
+    directionalLightRef.current = directional;
 
     const controls = new OrbitControls(camera, renderer.domElement);
     controls.enableDamping = true;
     controlsRef.current = controls;
 
+    clockRef.current = new THREE.Clock();
     const animate = () => {
+      const delta = clockRef.current.getDelta();
+      const elapsed = clockRef.current.getElapsedTime();
+
+      if (mixerRef.current) mixerRef.current.update(delta);
+
+      const night = isNightRef.current;
+      markerAnimRef.current.forEach(entry => {
+        entry.group.position.y =
+          entry.baseY + Math.sin(elapsed * 1.4 + entry.phase) * entry.bobAmplitude;
+        if (entry.update) entry.update(elapsed, night);
+      });
+
       controls.update();
       renderer.render(scene, camera);
       animationFrameRef.current = requestAnimationFrame(animate);
@@ -694,6 +754,8 @@ export default function SupersetPluginChartHelloWorld(
       modelGroupRef.current = null;
       deviceGroupRef.current = null;
       markerMeshesRef.current = [];
+      markerAnimRef.current = [];
+      mixerRef.current = null;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
@@ -703,6 +765,29 @@ export default function SupersetPluginChartHelloWorld(
     if (!sceneRef.current) return;
     sceneRef.current.background = new THREE.Color(backgroundColor || '#f8fafc');
   }, [backgroundColor]);
+
+  // Day/night only touches lighting, not the configured background colour —
+  // swapping to a cool, dim ambient + directional light for night, and back
+  // to the bright neutral defaults for day. Markers with their own
+  // day/night behaviour (e.g. the "light" shape's glow) read `isNightRef`
+  // directly inside the animate loop above.
+  useEffect(() => {
+    isNightRef.current = isNight;
+    const ambient = ambientLightRef.current;
+    const directional = directionalLightRef.current;
+    if (!ambient || !directional) return;
+    if (isNight) {
+      ambient.intensity = 0.22;
+      ambient.color.set('#7c9cff');
+      directional.intensity = 0.25;
+      directional.color.set('#8fb0ff');
+    } else {
+      ambient.intensity = 0.7;
+      ambient.color.set('#ffffff');
+      directional.intensity = 0.9;
+      directional.color.set('#ffffff');
+    }
+  }, [isNight]);
 
   // Click/hover handling. Re-registered whenever the pick target changes, so
   // the listener always reads fresh state without stale closures.
@@ -773,6 +858,10 @@ export default function SupersetPluginChartHelloWorld(
       disposeObject3D(modelGroupRef.current);
       modelGroupRef.current = null;
     }
+    // The mixer is tied to whichever GLB is currently loaded — clear it
+    // before either bailing out (no modelUrl) or loading a new one, so a
+    // stale mixer never keeps ticking against a disposed scene graph.
+    mixerRef.current = null;
 
     const modelUrl = resolvedModelUrl;
     if (!modelUrl) {
@@ -806,6 +895,23 @@ export default function SupersetPluginChartHelloWorld(
         modelGroupRef.current = group;
         scene.add(group);
         frameCameraRef.current();
+
+        // Play back whatever animation clips are baked into the GLB (rigged
+        // machinery, conveyor belts, spinning fans, etc). This is very
+        // likely the actual fix for "the model shows no motion" — the
+        // clips were there all along, nothing was ever driving them.
+        if (gltf.animations && gltf.animations.length > 0) {
+          const mixer = new THREE.AnimationMixer(gltf.scene);
+          gltf.animations.forEach(clip => mixer.clipAction(clip).play());
+          mixerRef.current = mixer;
+          // eslint-disable-next-line no-console
+          console.info(
+            `[3D Device Viewer] playing ${gltf.animations.length} model animation clip(s):`,
+            gltf.animations.map(c => c.name || '(unnamed)').join(', '),
+          );
+        } else {
+          mixerRef.current = null;
+        }
 
         const modelBox = new THREE.Box3().setFromObject(group);
         const modelSize = modelBox.getSize(new THREE.Vector3());
@@ -864,19 +970,23 @@ export default function SupersetPluginChartHelloWorld(
       deviceGroupRef.current = null;
     }
     markerMeshesRef.current = [];
+    markerAnimRef.current = [];
 
     if (visibleDevices.length === 0) return;
 
     const newMarkers: THREE.Mesh[] = [];
+    const newMarkerAnim: MarkerAnimEntry[] = [];
     const group = buildDeviceGroup(
       visibleDevices,
       newMarkers,
       modelWorldSize ?? FALLBACK_WORLD_SIZE,
       showLabels,
       modelShapes,
+      newMarkerAnim,
     );
     deviceGroupRef.current = group;
     markerMeshesRef.current = newMarkers;
+    markerAnimRef.current = newMarkerAnim;
     scene.add(group);
 
     // Keep the open detail panel in sync with the rebuilt (edited) device.
@@ -1240,28 +1350,80 @@ export default function SupersetPluginChartHelloWorld(
         />
       )}
 
-      {(resolvedModelUrl || placedDevices.length > 0) && (
-        <button
-          type="button"
-          onClick={() => frameCameraRef.current()}
+      <div
+        style={{
+          position: 'absolute',
+          bottom: 12,
+          right: 16,
+          zIndex: 3,
+          display: 'flex',
+          gap: 8,
+          alignItems: 'center',
+        }}
+      >
+        <div
+          role="group"
+          aria-label="Day or night lighting"
           style={{
-            position: 'absolute',
-            bottom: 12,
-            right: 16,
-            zIndex: 3,
-            padding: '5px 10px',
-            fontSize: 11,
-            fontWeight: 600,
-            color: '#334155',
-            background: 'rgba(255,255,255,0.9)',
+            display: 'flex',
             border: '1px solid #cbd5e1',
             borderRadius: 6,
-            cursor: 'pointer',
+            overflow: 'hidden',
+            background: 'rgba(255,255,255,0.9)',
           }}
         >
-          Reset view
-        </button>
-      )}
+          <button
+            type="button"
+            onClick={() => setIsNight(false)}
+            style={{
+              padding: '5px 10px',
+              fontSize: 11,
+              fontWeight: 700,
+              border: 'none',
+              cursor: 'pointer',
+              color: isNight ? '#64748b' : 'white',
+              background: isNight ? 'transparent' : '#2563eb',
+            }}
+          >
+            ☀ Day
+          </button>
+          <button
+            type="button"
+            onClick={() => setIsNight(true)}
+            style={{
+              padding: '5px 10px',
+              fontSize: 11,
+              fontWeight: 700,
+              border: 'none',
+              borderLeft: '1px solid #cbd5e1',
+              cursor: 'pointer',
+              color: isNight ? 'white' : '#64748b',
+              background: isNight ? '#1e3a8a' : 'transparent',
+            }}
+          >
+            🌙 Night
+          </button>
+        </div>
+
+        {(resolvedModelUrl || placedDevices.length > 0) && (
+          <button
+            type="button"
+            onClick={() => frameCameraRef.current()}
+            style={{
+              padding: '5px 10px',
+              fontSize: 11,
+              fontWeight: 600,
+              color: '#334155',
+              background: 'rgba(255,255,255,0.9)',
+              border: '1px solid #cbd5e1',
+              borderRadius: 6,
+              cursor: 'pointer',
+            }}
+          >
+            Reset view
+          </button>
+        )}
+      </div>
 
       <div
         style={{

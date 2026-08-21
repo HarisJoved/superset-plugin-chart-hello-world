@@ -60,6 +60,10 @@ export interface BuiltMarker {
    * shape below exposes exactly one, sized close to `radius`, so hit
    * testing stays simple regardless of which shape is active. */
   coreMesh: THREE.Mesh;
+  /** Called once per rendered frame with elapsed seconds since the marker
+   * was built and whether day/night mode is currently "night". Shapes that
+   * don't animate, or don't care about night, simply omit this. */
+  update?: (elapsed: number, isNight: boolean) => void;
 }
 
 function coreMaterial(color: THREE.Color): THREE.MeshStandardMaterial {
@@ -144,13 +148,13 @@ function buildPin(color: THREE.Color, radius: number): BuiltMarker {
   return { group, coreMesh };
 }
 
-/** Bulb with rays radiating out from the equator — a light/lighting sensor. */
+/** Bulb with rays radiating out from the equator — a light/lighting sensor.
+ * At night it glows (pulsing emissive, slowly spinning rays); by day it
+ * reads as switched off, same as a real streetlight would. */
 function buildLight(color: THREE.Color, radius: number): BuiltMarker {
   const group = new THREE.Group();
-  const coreMesh = new THREE.Mesh(
-    new THREE.SphereGeometry(radius, 16, 16),
-    coreMaterial(color),
-  );
+  const material = coreMaterial(color);
+  const coreMesh = new THREE.Mesh(new THREE.SphereGeometry(radius, 16, 16), material);
   group.add(coreMesh);
 
   const rayCount = 8;
@@ -162,6 +166,7 @@ function buildLight(color: THREE.Color, radius: number): BuiltMarker {
     6,
   );
   const rayMaterial = decorationMaterial(color, 0.85);
+  const rayGroup = new THREE.Group();
   for (let i = 0; i < rayCount; i += 1) {
     const angle = (i / rayCount) * Math.PI * 2;
     const ray = new THREE.Mesh(rayGeometry, rayMaterial);
@@ -172,15 +177,29 @@ function buildLight(color: THREE.Color, radius: number): BuiltMarker {
     // Cylinders default to standing on Y; lay them flat and point outward.
     ray.rotation.z = Math.PI / 2;
     ray.rotation.y = -angle;
-    group.add(ray);
+    rayGroup.add(ray);
   }
+  group.add(rayGroup);
 
-  return { group, coreMesh };
+  const DAY_EMISSIVE = 0.06;
+  const update = (elapsed: number, isNight: boolean) => {
+    if (isNight) {
+      material.emissiveIntensity = 0.6 + Math.sin(elapsed * 3) * 0.25;
+      rayMaterial.opacity = 0.65 + Math.sin(elapsed * 3) * 0.2;
+      rayGroup.rotation.y = elapsed * 0.15;
+    } else {
+      material.emissiveIntensity = DAY_EMISSIVE;
+      rayMaterial.opacity = 0.12;
+    }
+  };
+
+  return { group, coreMesh, update };
 }
 
 /** Small core plus a fixed scatter of tiny "particles" — dust / air-quality
  * sensor. The offsets are a deterministic fan-out (not random per render),
- * so the shape doesn't jitter every time markers rebuild. */
+ * so the shape doesn't jitter every time markers rebuild; each particle
+ * drifts around the core on its own slow orbit once animated. */
 function buildDust(color: THREE.Color, radius: number): BuiltMarker {
   const group = new THREE.Group();
   const coreMesh = new THREE.Mesh(
@@ -192,26 +211,50 @@ function buildDust(color: THREE.Color, radius: number): BuiltMarker {
   const particleGeometry = new THREE.SphereGeometry(radius * 0.18, 6, 6);
   const particleMaterial = decorationMaterial(color, 0.75);
   const particleCount = 10;
+  const particles: {
+    mesh: THREE.Mesh;
+    baseAngle: number;
+    distance: number;
+    elevation: number;
+    speed: number;
+  }[] = [];
   for (let i = 0; i < particleCount; i += 1) {
     // Deterministic pseudo-scatter: golden-angle spiral in azimuth, a small
     // fixed set of elevations/distances so particles read as a cloud
     // rather than a ring.
-    const angle = i * 2.399963; // golden angle, radians
+    const baseAngle = i * 2.399963; // golden angle, radians
     const elevation = ((i % 3) - 1) * radius * 0.5;
     const distance = radius * (1.1 + (i % 4) * 0.22);
-    const particle = new THREE.Mesh(particleGeometry, particleMaterial);
-    particle.position.set(
-      Math.cos(angle) * distance,
+    const mesh = new THREE.Mesh(particleGeometry, particleMaterial);
+    mesh.position.set(
+      Math.cos(baseAngle) * distance,
       elevation,
-      Math.sin(angle) * distance,
+      Math.sin(baseAngle) * distance,
     );
-    group.add(particle);
+    group.add(mesh);
+    // Alternate drift direction and vary speed a little per particle so the
+    // cloud reads as loosely drifting rather than rigidly rotating in lockstep.
+    const speed = (0.25 + (i % 3) * 0.12) * (i % 2 === 0 ? 1 : -1);
+    particles.push({ mesh, baseAngle, distance, elevation, speed });
   }
 
-  return { group, coreMesh };
+  const update = (elapsed: number) => {
+    particles.forEach(p => {
+      const angle = p.baseAngle + elapsed * p.speed;
+      const bob = Math.sin(elapsed * 1.3 + p.baseAngle) * radius * 0.15;
+      p.mesh.position.set(
+        Math.cos(angle) * p.distance,
+        p.elevation + bob,
+        Math.sin(angle) * p.distance,
+      );
+    });
+  };
+
+  return { group, coreMesh, update };
 }
 
-/** Core plus two flat expanding rings — a noise / audio sensor. */
+/** Core plus two flat rings that pulse outward and fade like sonar pings —
+ * a noise / audio sensor. */
 function buildNoise(color: THREE.Color, radius: number): BuiltMarker {
   const group = new THREE.Group();
   const coreMesh = new THREE.Mesh(
@@ -220,26 +263,33 @@ function buildNoise(color: THREE.Color, radius: number): BuiltMarker {
   );
   group.add(coreMesh);
 
-  const ringMaterial = decorationMaterial(color, 0.5);
-  [
-    [radius * 1.1, radius * 1.35],
-    [radius * 1.6, radius * 1.85],
-  ].forEach(([inner, outer]) => {
-    const ring = new THREE.Mesh(
-      new THREE.RingGeometry(inner, outer, 24),
-      ringMaterial,
-    );
-    ring.rotation.x = Math.PI / 2;
-    group.add(ring);
-
-    const ringSide = new THREE.Mesh(
-      new THREE.RingGeometry(inner, outer, 24),
-      ringMaterial,
-    );
+  const inner = radius * 1.1;
+  const outer = radius * 1.35;
+  const ringGeometry = new THREE.RingGeometry(inner, outer, 24);
+  // Two rings (one flat/up, one facing the camera side-on) per pulse, at two
+  // offset phases, so pings continuously radiate rather than blinking as one.
+  const pulses: { mesh: THREE.Mesh; material: THREE.MeshBasicMaterial; offsetSec: number }[] = [];
+  [0, 0.8].forEach(offsetSec => {
+    const material = decorationMaterial(color, 0.55);
+    const ringUp = new THREE.Mesh(ringGeometry, material);
+    ringUp.rotation.x = Math.PI / 2;
+    group.add(ringUp);
+    const ringSide = new THREE.Mesh(ringGeometry, material);
     group.add(ringSide);
+    pulses.push({ mesh: ringUp, material, offsetSec });
   });
 
-  return { group, coreMesh };
+  const PERIOD = 1.6;
+  const update = (elapsed: number) => {
+    pulses.forEach(p => {
+      const t = (((elapsed + p.offsetSec) % PERIOD) + PERIOD) % PERIOD / PERIOD;
+      const scale = 1 + t * 0.9;
+      p.mesh.scale.setScalar(scale);
+      p.material.opacity = 0.55 * (1 - t);
+    });
+  };
+
+  return { group, coreMesh, update };
 }
 
 const BUILDERS: Record<
