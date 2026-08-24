@@ -182,14 +182,26 @@ const config: ControlPanelConfig = {
       controlSetRows: [
         [
           {
-            name: 'background_color',
+            name: 'day_background_color',
             config: {
-              type: 'TextControl',
-              default: '#f8fafc',
+              type: 'ColorPickerControl',
+              default: { r: 248, g: 250, b: 252, a: 1 },
               renderTrigger: true,
-              label: t('Background Color'),
+              label: t('Day Background Color'),
               description: t(
-                'Hex color for the viewer background, e.g. #f8fafc',
+                'Viewer background while Day mode is active (toggle in the 3D view).',
+              ),
+            },
+          },
+          {
+            name: 'night_background_color',
+            config: {
+              type: 'ColorPickerControl',
+              default: { r: 11, g: 15, b: 23, a: 1 },
+              renderTrigger: true,
+              label: t('Night Background Color'),
+              description: t(
+                'Viewer background while Night mode is active (toggle in the 3D view).',
               ),
             },
           },

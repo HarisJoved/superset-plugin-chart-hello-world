@@ -215,8 +215,15 @@ export function SensorDetailPanel({ device, onClose, onViewGraph }: DetailPanelP
                 borderBottom: '1px solid #f1f5f9',
               }}
             >
-              <div style={{ color: '#475569' }}>{formatAttrLabel(attr.key)}</div>
-              <div style={{ fontWeight: 600, textAlign: 'right' }}>
+              <div style={{ color: '#475569', flexShrink: 0 }}>{formatAttrLabel(attr.key)}</div>
+              <div
+                style={{
+                  fontWeight: 600,
+                  textAlign: 'right',
+                  minWidth: 0,
+                  wordBreak: 'break-word',
+                }}
+              >
                 {formatAttrValue(attr.value)}
               </div>
             </div>

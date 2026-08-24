@@ -26,7 +26,8 @@ export default function transformProps(chartProps: ChartProps) {
     headerFontSize,
     headerText,
     sceneDataJson,
-    backgroundColor,
+    dayBackgroundColor,
+    nightBackgroundColor,
     cameraZoom,
     showLabels,
     sensorSource,
@@ -48,7 +49,8 @@ export default function transformProps(chartProps: ChartProps) {
     headerFontSize,
     headerText,
     sceneDataJson,
-    backgroundColor,
+    dayBackgroundColor,
+    nightBackgroundColor,
     // TextControl hands back a string; fall back to a plain fit when it's
     // blank or nonsense rather than pushing the camera to NaN.
     cameraZoom: Number.isFinite(parsedZoom) && parsedZoom > 0 ? parsedZoom : 1,

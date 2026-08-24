@@ -28,6 +28,7 @@ import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
 import {
   DeviceDatum,
   LocationPoi,
+  RgbaColor,
   SceneData,
   SensorSource,
   SupersetPluginChartHelloWorldProps,
@@ -58,6 +59,20 @@ import { AlertsPanel } from './AlertsPanel';
 const FALLBACK_WORLD_SIZE = 5;
 
 const FALLBACK_MARKER_COLOR = '#2563eb';
+
+/** Converts a Superset `ColorPickerControl` value ({r,g,b,a}, 0-255/0-1) to
+ * a hex string, passing plain strings through unchanged so charts saved
+ * before Day/Night Background Color existed (when this was a hex TextControl)
+ * keep working without a migration. */
+function colorPropToHex(value: RgbaColor | string | undefined, fallback: string): string {
+  if (typeof value === 'string' && value.trim()) return value;
+  if (value && typeof value === 'object' && 'r' in value) {
+    const clamp = (n: number) => Math.max(0, Math.min(255, Math.round(n)));
+    const toHex = (n: number) => clamp(n).toString(16).padStart(2, '0');
+    return `#${toHex(value.r)}${toHex(value.g)}${toHex(value.b)}`;
+  }
+  return fallback;
+}
 
 const filterSelectStyle: React.CSSProperties = {
   fontSize: 11,
@@ -230,7 +245,8 @@ export default function SupersetPluginChartHelloWorld(
     headerFontSize,
     headerText,
     sceneDataJson,
-    backgroundColor,
+    dayBackgroundColor,
+    nightBackgroundColor,
     cameraZoom = 1,
     showLabels = true,
     sensorSource,
@@ -760,11 +776,17 @@ export default function SupersetPluginChartHelloWorld(
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // Recolour the existing scene in place rather than rebuilding it.
+  // Recolour the existing scene in place rather than rebuilding it. Picks
+  // Day or Night's configured colour based on the toggle, so switching
+  // modes changes both lighting (separate effect below) and background
+  // together.
   useEffect(() => {
     if (!sceneRef.current) return;
-    sceneRef.current.background = new THREE.Color(backgroundColor || '#f8fafc');
-  }, [backgroundColor]);
+    const hex = isNight
+      ? colorPropToHex(nightBackgroundColor, '#0b0f17')
+      : colorPropToHex(dayBackgroundColor, '#f8fafc');
+    sceneRef.current.background = new THREE.Color(hex);
+  }, [dayBackgroundColor, nightBackgroundColor, isNight]);
 
   // Day/night only touches lighting, not the configured background colour —
   // swapping to a cool, dim ambient + directional light for night, and back
@@ -1268,9 +1290,11 @@ export default function SupersetPluginChartHelloWorld(
         <div
           style={{
             position: 'absolute',
-            bottom: 12,
+            // Clears the Devices/Alerts button row, which always sits at
+            // bottom: 12 in this same left corner.
+            bottom: 48,
             left: 16,
-            right: 96,
+            right: 16,
             zIndex: 2,
             fontSize: '12px',
             color: '#475569',

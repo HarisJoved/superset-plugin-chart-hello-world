@@ -820,4 +820,5 @@ const theStyle: React.CSSProperties = {
 const tdStyle: React.CSSProperties = {
   padding: '10px',
   verticalAlign: 'top',
+  wordBreak: 'break-word',
 };

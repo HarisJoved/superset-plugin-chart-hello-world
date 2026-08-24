@@ -308,11 +308,27 @@ export function formatAttrLabel(key: string): string {
   return key.replace(/_/g, ' ');
 }
 
+const ISO_DATE_RE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}/;
+
 export function formatAttrValue(value: unknown): string {
   if (typeof value === 'number') {
     return Number.isInteger(value) ? String(value) : value.toFixed(2);
   }
   if (value === null || value === undefined) return '—';
+  // Raw ISO timestamps ("2026-01-29T02:42:05.633Z") are common in NGSI
+  // payloads (dateObserved, TimeInstant, ...) — shown as-is they're both
+  // unreadable and, being one long unbreakable token, prone to overflowing
+  // whatever fixed-width panel is displaying them.
+  if (typeof value === 'string' && ISO_DATE_RE.test(value)) {
+    const d = new Date(value);
+    if (!Number.isNaN(d.getTime())) {
+      return `${d.toLocaleDateString(undefined, {
+        day: '2-digit',
+        month: 'short',
+        year: 'numeric',
+      })}, ${d.toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' })}`;
+    }
+  }
   if (typeof value === 'object') return JSON.stringify(value);
   return String(value);
 }

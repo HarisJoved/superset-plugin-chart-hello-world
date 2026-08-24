@@ -104,10 +104,22 @@ export type SensorSource = 'json' | 'dataset';
 /** One row of the sensor dataset, as returned by the chart data API. */
 export type SensorRow = Record<string, unknown>;
 
+/** What a Superset `ColorPickerControl` produces — r/g/b are 0-255, a is 0-1. */
+export interface RgbaColor {
+  r: number;
+  g: number;
+  b: number;
+  a?: number;
+}
+
 interface SupersetPluginChartHelloWorldCustomizeProps {
   headerText: string;
   sceneDataJson: string;
-  backgroundColor: string;
+  /** Viewer background while Day mode is active. Accepts the ColorPickerControl's
+   * {r,g,b,a} shape, or a plain hex string for backward compatibility with
+   * charts saved before this was a colour picker. */
+  dayBackgroundColor?: RgbaColor | string;
+  nightBackgroundColor?: RgbaColor | string;
   /** Multiplier on the auto-fit camera distance. 1 = fit model to viewport. */
   cameraZoom?: number;
   /** Whether to draw the billboard name label next to each marker. */
