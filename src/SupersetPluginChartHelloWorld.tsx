@@ -930,7 +930,7 @@ export default function SupersetPluginChartHelloWorld(
           mixerRef.current = mixer;
           // eslint-disable-next-line no-console
           console.info(
-            `[3D Device Viewer] playing ${gltf.animations.length} model animation clip(s):`,
+            `[3D Viewer] playing ${gltf.animations.length} model animation clip(s):`,
             gltf.animations.map(c => c.name || '(unnamed)').join(', '),
           );
         } else {
@@ -949,7 +949,7 @@ export default function SupersetPluginChartHelloWorld(
         }
         // eslint-disable-next-line no-console
         console.info(
-          '[3D Device Viewer] model bounding box — size (x,y,z):',
+          '[3D Viewer] model bounding box — size (x,y,z):',
           modelSize.x.toFixed(3),
           modelSize.y.toFixed(3),
           modelSize.z.toFixed(3),
@@ -1112,7 +1112,7 @@ export default function SupersetPluginChartHelloWorld(
           pointerEvents: 'none',
         }}
       >
-        {headerText || '3D Device Viewer'}
+        {headerText || '3D Viewer'}
       </div>
 
       {placedDevices.length > 0 && (
@@ -1472,6 +1472,10 @@ export default function SupersetPluginChartHelloWorld(
           devices={devices}
           activePanel={activePanel}
           onNavigate={setActivePanel}
+          onFocusDevice={device => {
+            setActivePanel('3d');
+            focusOnDeviceRef.current(device);
+          }}
         />
       )}
 

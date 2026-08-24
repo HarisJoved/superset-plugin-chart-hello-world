@@ -17,7 +17,7 @@
  * under the License.
  */
 import React, { useEffect, useMemo, useRef, useState } from 'react';
-import { DeviceDatum } from './types';
+import { DeviceDatum, isPlaced } from './types';
 import {
   HistoryPoint,
   HistoryResult,
@@ -30,9 +30,18 @@ import {
   fetchLatestDeviceData,
   formatAttrLabel,
   formatAttrValue,
+  hexToRgba,
   resolveNgsiId,
   sensorDisplayName,
 } from './api';
+import {
+  AlertRecord,
+  fetchAlertsForDevice,
+  formatAlertDate,
+  severityColor,
+  statusColor,
+} from './alertsApi';
+import { AlertDetailModal } from './AlertDetailModal';
 import { AttributeAreaChart, formatLastUpdated, formatTick } from './SensorPanels';
 import { PanelId, PanelNav } from './PanelNav';
 
@@ -40,12 +49,28 @@ const PAGE_SIZE = 20;
 const MAX_TABLE_ATTR_COLUMNS = 8;
 const COMPARE_COLORS = ['#2563eb', '#dc2626', '#16a34a', '#d97706', '#7c3aed', '#0891b2', '#db2777', '#65a30d'];
 
+const getModelColor = (key: string) => {
+  if (key === 'coolon-light') return '#eab308'; // yellow
+  if (key === OTHER_MODEL_KEY) return '#64748b'; // slate/gray
+  
+  // Generate consistent distinct colors for other models
+  const colors = ['#2563eb', '#16a34a', '#dc2626', '#7c3aed', '#0891b2', '#db2777', '#65a30d'];
+  let hash = 0;
+  for (let i = 0; i < key.length; i++) {
+    hash = key.charCodeAt(i) + ((hash << 5) - hash);
+  }
+  return colors[Math.abs(hash) % colors.length];
+};
+
 interface DevicesPanelProps {
   /** Every sensor the chart knows about  not just the placed ones, since
    * the table is a data-browsing tool independent of 3D placement. */
   devices: DeviceDatum[];
   activePanel: PanelId;
   onNavigate: (panel: PanelId) => void;
+  /** Switches to the 3D view and points the camera at this sensor. Omitted
+   * for callers that don't have a 3D view to jump to. */
+  onFocusDevice?: (device: DeviceDatum) => void;
 }
 
 type LatestEntry = { loading: boolean; data?: LatestDeviceData; error?: string };
@@ -56,7 +81,7 @@ type LatestEntry = { loading: boolean; data?: LatestDeviceData; error?: string }
  * history side by side. Sits on top of the 3D viewer as an overlay; the
  * shared PanelNav (bottom-left) is how you get back or over to Alerts.
  */
-export function DevicesPanel({ devices, activePanel, onNavigate }: DevicesPanelProps) {
+export function DevicesPanel({ devices, activePanel, onNavigate, onFocusDevice }: DevicesPanelProps) {
   const [search, setSearch] = useState('');
   const [modelFilter, setModelFilter] = useState<string>('__all__');
   const [page, setPage] = useState(0);
@@ -64,6 +89,7 @@ export function DevicesPanel({ devices, activePanel, onNavigate }: DevicesPanelP
   const [compareSelection, setCompareSelection] = useState<string[]>([]);
   const [compareOpen, setCompareOpen] = useState(false);
   const [historyDevice, setHistoryDevice] = useState<DeviceDatum | null>(null);
+  const [alertsDevice, setAlertsDevice] = useState<DeviceDatum | null>(null);
   const [latestById, setLatestById] = useState<Record<string, LatestEntry>>({});
 
   const modelChips = useMemo(() => {
@@ -128,7 +154,7 @@ export function DevicesPanel({ devices, activePanel, onNavigate }: DevicesPanelP
   // mount, `pageRows` briefly holds every device across every model before
   // that effect narrows it down. Starting real fetches against that
   // transient, about-to-be-replaced list was wasted work  and, worse, it's
-  // what caused rows to get stuck on "&" forever (see below).
+  // what caused rows to get stuck on "..." forever (see below).
   useEffect(() => {
     if (modelChips.length > 0 && !defaultFilterAppliedRef.current) return undefined;
 
@@ -138,7 +164,7 @@ export function DevicesPanel({ devices, activePanel, onNavigate }: DevicesPanelP
 
     // Kept low and staggered on purpose: firing a burst of requests at the
     // gateway (this was 5-at-once, unstaggered) appears to be exactly what
-    // triggers rows getting stuck on "&" forever  the IoT gateway seems to
+    // triggers rows getting stuck on "..." forever  the IoT gateway seems to
     // rate-limit or silently drop concurrent bursts rather than queueing
     // them, and a plain `fetch()` with no timeout just hangs when that
     // happens (see `fetchWithTimeout` in api.ts for the other half of this
@@ -150,7 +176,7 @@ export function DevicesPanel({ devices, activePanel, onNavigate }: DevicesPanelP
     // used to mean that if this effect got cancelled (e.g. the model
     // filter changing) before a staggered worker reached its turn, that
     // device already "had an entry" in `latestById` and so `toFetch` above
-    // would skip it on every future run  stranding it on "&" forever even
+    // would skip it on every future run  stranding it on "..." forever even
     // though its request never actually went out.
     const CONCURRENCY = 3;
     const STAGGER_MS = 120;
@@ -195,7 +221,7 @@ export function DevicesPanel({ devices, activePanel, onNavigate }: DevicesPanelP
   // Attribute columns are now always derived from whatever's loaded for the
   // current page, regardless of whether a single model is selected  a
   // mixed page just ends up with the union of keys across models (capped),
-  // with '' in cells where a given device doesn't report that attribute.
+  // with '-' in cells where a given device doesn't report that attribute.
   // This is what actually puts the per-attribute columns (and their icons)
   // on screen instead of the old squashed "Latest" summary cell, which is
   // where they were going missing before.
@@ -264,30 +290,52 @@ export function DevicesPanel({ devices, activePanel, onNavigate }: DevicesPanelP
           onNavigate={onNavigate}
           deviceCount={devices.length}
           variant="dark"
-          menuDirection="down"
         />
 
         <div style={{ fontSize: 18, fontWeight: 700, marginRight: 4 }}>
           Devices ({devices.length})
         </div>
 
-        <input
-          type="text"
-          value={search}
-          onChange={e => setSearch(e.target.value)}
-          placeholder="Search devices&"
-          style={searchInputStyle}
-        />
+        <div style={{ position: 'relative' }}>
+          <span
+            aria-hidden
+            style={{
+              position: 'absolute',
+              left: 10,
+              top: '50%',
+              transform: 'translateY(-50%)',
+              fontSize: 12,
+              color: '#64748b',
+              pointerEvents: 'none',
+            }}
+          >
+            =
 
-        <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', flex: 1 }}>
+          </span>
+          <input
+            type="text"
+            value={search}
+            onChange={e => setSearch(e.target.value)}
+            placeholder="Search devices..."
+            style={{ ...searchInputStyle, paddingLeft: 28 }}
+          />
+        </div>
+
+        <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', flex: 1 }}>
           {modelChips.map(chip => {
             const active = modelFilter === chip.key;
+            const color = getModelColor(chip.key);
             return (
               <button
                 key={chip.key}
                 type="button"
                 onClick={() => setModelFilter(active ? '__all__' : chip.key)}
-                style={{ ...chipStyle, ...(active ? chipActiveStyle : {}) }}
+                style={{
+                  ...chipStyle,
+                  color: active ? '#0b0f17' : color,
+                  background: active ? color : hexToRgba(color, 0.14),
+                  border: `1px solid ${active ? color : hexToRgba(color, 0.4)}`,
+                }}
               >
                 {chip.label}: {chip.count}
               </button>
@@ -303,7 +351,7 @@ export function DevicesPanel({ devices, activePanel, onNavigate }: DevicesPanelP
           <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
             <span style={{ fontSize: 12, color: '#94a3b8' }}>
               {compareSelection.length === 0
-                ? 'Select sensors of the same model&'
+                ? 'Select sensors of the same model...'
                 : `${compareSelection.length} selected`}
             </span>
             <button
@@ -325,13 +373,13 @@ export function DevicesPanel({ devices, activePanel, onNavigate }: DevicesPanelP
         )}
       </div>
 
-      <div style={{ flex: 1, overflow: 'auto', padding: '0 20px' }}>
+      <div style={{ flex: 1, overflow: 'auto', padding: '4px 20px 20px' }}>
         {filtered.length === 0 ? (
           <div style={{ padding: '40px 0', textAlign: 'center', color: '#64748b' }}>
             No sensors match your search or filter.
           </div>
         ) : (
-          <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 13 }}>
+          <table style={{ width: '100%', borderCollapse: 'separate', borderSpacing: '0 8px', fontSize: 13 }}>
             <thead>
               <tr style={{ textAlign: 'left', color: '#94a3b8', fontSize: 11, textTransform: 'uppercase' }}>
                 {compareMode && <th style={theStyle}> </th>}
@@ -343,15 +391,27 @@ export function DevicesPanel({ devices, activePanel, onNavigate }: DevicesPanelP
                   </th>
                 ))}
                 <th style={theStyle}>Last updated</th>
+                <th style={{ ...theStyle, textAlign: 'right' }}>Actions</th>
               </tr>
             </thead>
             <tbody>
               {pageRows.map(device => {
                 const entry = latestById[device.deviceId];
                 const key = deviceModelKey(device);
+                const color = getModelColor(key);
+                const placed = isPlaced(device);
                 const rowDisabledForCompare =
                   compareMode && compareModelKey !== null && key !== compareModelKey;
                 const checked = compareSelection.includes(device.deviceId);
+                const firstCellRadius: React.CSSProperties = {
+                  borderTopLeftRadius: 10,
+                  borderBottomLeftRadius: 10,
+                };
+                const lastCellRadius: React.CSSProperties = {
+                  borderTopRightRadius: 10,
+                  borderBottomRightRadius: 10,
+                };
+                const cellBg = checked ? 'rgba(37,99,235,0.16)' : rowCardStyle.background;
 
                 return (
                   <tr
@@ -364,14 +424,12 @@ export function DevicesPanel({ devices, activePanel, onNavigate }: DevicesPanelP
                       }
                     }}
                     style={{
-                      borderBottom: '1px solid #1a212c',
                       cursor: rowDisabledForCompare ? 'not-allowed' : 'pointer',
                       opacity: rowDisabledForCompare ? 0.4 : 1,
-                      background: checked ? 'rgba(37,99,235,0.12)' : 'transparent',
                     }}
                   >
                     {compareMode && (
-                      <td style={tdStyle}>
+                      <td style={{ ...tdStyle, ...rowCardStyle, ...firstCellRadius, background: cellBg }}>
                         <input
                           type="checkbox"
                           checked={checked}
@@ -381,22 +439,35 @@ export function DevicesPanel({ devices, activePanel, onNavigate }: DevicesPanelP
                         />
                       </td>
                     )}
-                    <td style={tdStyle}>
-                      <div style={{ fontWeight: 700 }}>{sensorDisplayName(device)}</div>
-                      {key !== OTHER_MODEL_KEY && (
-                        <div style={{ fontSize: 11, color: '#64748b' }}>{key}</div>
-                      )}
+                    <td
+                      style={{
+                        ...tdStyle,
+                        ...rowCardStyle,
+                        ...(compareMode ? {} : firstCellRadius),
+                        background: cellBg,
+                      }}
+                    >
+                      <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+                        <div>
+                          <div style={{ fontWeight: 700 }}>{sensorDisplayName(device)}</div>
+                          {key !== OTHER_MODEL_KEY && (
+                            <div style={{ fontSize: 11, color: color }}>{key}</div>
+                          )}
+                        </div>
+                      </div>
                     </td>
 
                     {!singleModelFilter && (
-                      <td style={tdStyle}>{key === OTHER_MODEL_KEY ? '' : key}</td>
+                      <td style={{ ...tdStyle, ...rowCardStyle }}>
+                        {key === OTHER_MODEL_KEY ? '' : key}
+                      </td>
                     )}
                     {attrColumns.map(attrKey => {
                       const attr = entry?.data?.attributes.find(a => a.key === attrKey);
                       return (
-                        <td key={attrKey} style={tdStyle}>
+                        <td key={attrKey} style={{ ...tdStyle, ...rowCardStyle }}>
                           {entry?.loading ? (
-                            '&'
+                            '...'
                           ) : attr ? (
                             <span>
                               <span style={{ marginRight: 5 }}>{attrIcon(attrKey)}</span>
@@ -404,23 +475,60 @@ export function DevicesPanel({ devices, activePanel, onNavigate }: DevicesPanelP
                             </span>
                           ) : entry?.error ? (
                             <span style={{ color: '#f87171' }} title={entry.error}>
-                              � failed
+                              failed
                             </span>
                           ) : (
-                            ''
+                            ''
                           )}
                         </td>
                       );
                     })}
 
-                    <td style={{ ...tdStyle, fontSize: 12, color: '#64748b' }}>
+                    <td style={{ ...tdStyle, ...rowCardStyle, fontSize: 12, color: '#64748b' }}>
                       {entry?.data
                         ? formatLastUpdated(entry.data.lastUpdated)
                         : entry?.loading
-                          ? '&'
+                          ? '...'
                           : entry?.error
-                            ? '�'
-                            : ''}
+                            ? '-'
+                            : ''}
+                    </td>
+
+                    <td
+                      style={{ ...tdStyle, ...rowCardStyle, ...lastCellRadius, textAlign: 'right' }}
+                      onClick={e => e.stopPropagation()}
+                    >
+                      <div style={{ display: 'flex', gap: 6, justifyContent: 'flex-end' }}>
+                        <button
+                          type="button"
+                          title={placed ? 'View this device in the 3D view' : 'Not placed in the 3D scene'}
+                          disabled={!placed || !onFocusDevice}
+                          onClick={() => onFocusDevice && onFocusDevice(device)}
+                          style={{
+                            ...actionIconButtonStyle,
+                            color: '#60a5fa',
+                            borderColor: 'rgba(96,165,250,0.35)',
+                            background: 'rgba(96,165,250,0.1)',
+                            opacity: placed && onFocusDevice ? 1 : 0.35,
+                            cursor: placed && onFocusDevice ? 'pointer' : 'not-allowed',
+                          }}
+                        >
+                          
+                        </button>
+                        <button
+                          type="button"
+                          title="View alerts for this device"
+                          onClick={() => setAlertsDevice(device)}
+                          style={{
+                            ...actionIconButtonStyle,
+                            color: '#f87171',
+                            borderColor: 'rgba(248,113,113,0.35)',
+                            background: 'rgba(248,113,113,0.1)',
+                          }}
+                        >
+                          =
+                        </button>
+                      </div>
                     </td>
                   </tr>
                 );
@@ -466,6 +574,10 @@ export function DevicesPanel({ devices, activePanel, onNavigate }: DevicesPanelP
 
       {historyDevice && (
         <HistoryDrawer device={historyDevice} onClose={() => setHistoryDevice(null)} />
+      )}
+
+      {alertsDevice && (
+        <DeviceAlertsDrawer device={alertsDevice} onClose={() => setAlertsDevice(null)} />
       )}
 
       {compareOpen && (
@@ -571,7 +683,7 @@ function HistoryDrawer({ device, onClose }: { device: DeviceDatum; onClose: () =
   return (
     <Drawer onClose={onClose} title={`${sensorDisplayName(device)}  history`}>
       <DateRangeFilter from={from} to={to} onFromChange={setFrom} onToChange={setTo} onApply={load} />
-      {loading && <div style={{ color: '#94a3b8' }}>Loading&</div>}
+      {loading && <div style={{ color: '#94a3b8' }}>Loading...</div>}
       {!loading && error && <div style={{ color: '#f87171', fontSize: 12 }}>{error}</div>}
       {!loading && !error && result && (
         <>
@@ -593,6 +705,117 @@ function HistoryDrawer({ device, onClose }: { device: DeviceDatum; onClose: () =
             </div>
           ))}
         </>
+      )}
+    </Drawer>
+  );
+}
+
+/* ------------------------------------------------------------------ */
+/* Alerts drawer -- every alert raised against one device, opened from */
+/* the alert action button on its row.                                 */
+/* ------------------------------------------------------------------ */
+
+function DeviceAlertsDrawer({ device, onClose }: { device: DeviceDatum; onClose: () => void }) {
+  const deviceId = resolveNgsiId(device);
+  const [alerts, setAlerts] = useState<AlertRecord[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState('');
+  const [selectedAlert, setSelectedAlert] = useState<AlertRecord | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    setLoading(true);
+    setError('');
+    fetchAlertsForDevice(deviceId, 50)
+      .then(result => {
+        if (!cancelled) setAlerts(result.alerts);
+      })
+      .catch((e: Error) => {
+        if (!cancelled) setError(e.message || 'Failed to load alerts.');
+      })
+      .finally(() => {
+        if (!cancelled) setLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [deviceId]);
+
+  return (
+    <Drawer onClose={onClose} title={`${sensorDisplayName(device)}  alerts`}>
+      {loading && <div style={{ color: '#94a3b8' }}>Loading...</div>}
+      {!loading && error && <div style={{ color: '#f87171', fontSize: 12 }}>{error}</div>}
+      {!loading && !error && alerts.length === 0 && (
+        <div style={{ color: '#64748b', fontSize: 13 }}>No alerts recorded for this device.</div>
+      )}
+      {!loading &&
+        !error &&
+        alerts.map(alert => {
+          const sev = severityColor(alert.severity);
+          const stat = statusColor(alert.status);
+          return (
+            <button
+              key={alert.id}
+              type="button"
+              onClick={() => setSelectedAlert(alert)}
+              style={{
+                display: 'block',
+                width: '100%',
+                textAlign: 'left',
+                background: '#111826',
+                border: '1px solid #1f2733',
+                borderRadius: 10,
+                padding: '10px 12px',
+                marginBottom: 8,
+                cursor: 'pointer',
+                color: '#e2e8f0',
+              }}
+            >
+              <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 4 }}>
+                <span
+                  style={{
+                    width: 8,
+                    height: 8,
+                    borderRadius: '50%',
+                    background: sev.bg,
+                    flexShrink: 0,
+                  }}
+                />
+                <span style={{ fontWeight: 700, fontSize: 13, flex: 1 }}>{alert.eventType}</span>
+                <span
+                  style={{
+                    padding: '2px 8px',
+                    borderRadius: 999,
+                    fontSize: 10,
+                    fontWeight: 700,
+                    color: stat.fg,
+                    background: stat.bg,
+                    whiteSpace: 'nowrap',
+                  }}
+                >
+                  {alert.status}
+                </span>
+              </div>
+              <div style={{ fontSize: 11, color: '#94a3b8', marginBottom: 4 }}>
+                {formatAlertDate(alert.dateObserved)}
+              </div>
+              <div style={{ fontSize: 12, color: '#cbd5e1' }}>
+                {alert.description || alert.message || 'No description provided.'}
+              </div>
+            </button>
+          );
+        })}
+
+      {selectedAlert && (
+        <AlertDetailModal
+          alert={selectedAlert}
+          onClose={() => setSelectedAlert(null)}
+          onResolved={alertId => {
+            setAlerts(prev =>
+              prev.map(a => (a.id === alertId ? { ...a, status: 'resolved' } : a)),
+            );
+          }}
+        />
       )}
     </Drawer>
   );
@@ -676,7 +899,7 @@ function CompareDrawer({ devices, onClose }: { devices: DeviceDatum[]; onClose: 
         ))}
       </div>
 
-      {anyLoading && <div style={{ color: '#94a3b8', marginBottom: 12 }}>Loading history&</div>}
+      {anyLoading && <div style={{ color: '#94a3b8', marginBottom: 12 }}>Loading history...</div>}
 
       {attributes.length === 0 && !anyLoading && (
         <div style={{ color: '#64748b' }}>No comparable numeric history available.</div>
@@ -796,8 +1019,8 @@ function MultiSeriesChart({
           const avg = values.reduce((a, b) => a + b, 0) / values.length;
           return (
             <div key={s.label} style={{ fontSize: 11, color: '#475569' }}>
-              <span style={{ color: s.color, fontWeight: 700 }}>{s.label}</span>: min {min.toFixed(1)} � max{' '}
-              {max.toFixed(1)} � avg {avg.toFixed(1)}
+              <span style={{ color: s.color, fontWeight: 700 }}>{s.label}</span>: min {min.toFixed(1)}  max{' '}
+              {max.toFixed(1)}  avg {avg.toFixed(1)}
             </div>
           );
         })}
@@ -921,12 +1144,6 @@ const chipStyle: React.CSSProperties = {
   whiteSpace: 'nowrap',
 };
 
-const chipActiveStyle: React.CSSProperties = {
-  color: 'white',
-  background: '#2563eb',
-  border: '1px solid #2563eb',
-};
-
 const theStyle: React.CSSProperties = {
   padding: '8px 10px',
   borderBottom: '1px solid #1f2733',
@@ -936,7 +1153,29 @@ const theStyle: React.CSSProperties = {
 };
 
 const tdStyle: React.CSSProperties = {
-  padding: '10px',
-  verticalAlign: 'top',
+  padding: '12px 14px',
+  verticalAlign: 'middle',
   wordBreak: 'break-word',
+};
+
+/** Background applied to every cell in a row so the row reads as one
+ * rounded card instead of a plain ruled table line  paired with the
+ * borderSpacing set on the <table> and the corner radii applied to each
+ * row's first/last cell. */
+const rowCardStyle: React.CSSProperties = {
+  background: '#111826',
+};
+
+const actionIconButtonStyle: React.CSSProperties = {
+  width: 30,
+  height: 30,
+  display: 'inline-flex',
+  alignItems: 'center',
+  justifyContent: 'center',
+  fontSize: 13,
+  border: '1px solid #2a3341',
+  borderRadius: 8,
+  background: '#1a212c',
+  color: '#e2e8f0',
+  cursor: 'pointer',
 };

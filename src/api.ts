@@ -401,6 +401,67 @@ export function deviceModelKey(device: {
   return parsed.isNgsiUrn && parsed.modelName ? parsed.modelName : OTHER_MODEL_KEY;
 }
 
+/** Visual identity (accent colour + icon) for one sensor model, used to
+ * colour-code the model filter chips and the row badges in the Devices
+ * table so a busy fleet reads as distinct categories at a glance instead of
+ * one flat list. Keyword-matched against the model key first (so
+ * "Coolon-Light" reliably lands on the "lighting" colour regardless of
+ * vendor prefix); anything that doesn't match a known category still gets a
+ * stable colour, hashed from its name so the same model always renders the
+ * same way. */
+export interface ModelStyle {
+  color: string;
+  icon: string;
+}
+
+const MODEL_STYLE_RULES: { match: RegExp; color: string; icon: string }[] = [
+  { match: /weather|climate|env/i, color: '#38bdf8', icon: '☁️' },
+  { match: /light|lumin|lux|coolon/i, color: '#f59e0b', icon: '💡' },
+  { match: /noise|sound|acoustic|audio/i, color: '#22c55e', icon: '🔊' },
+  { match: /dust|particulate|pm\d/i, color: '#b45309', icon: '🌫️' },
+  { match: /water|flow|flood|leak|moisture/i, color: '#0ea5e9', icon: '💧' },
+  { match: /temp|thermo|hvac/i, color: '#ef4444', icon: '🌡️' },
+  { match: /motion|presence|occupan|pir/i, color: '#a855f7', icon: '🚶' },
+  { match: /gas|air|co2|aqi|smoke/i, color: '#14b8a6', icon: '🌬️' },
+  { match: /camera|cctv|vision/i, color: '#6366f1', icon: '📷' },
+  { match: /power|energy|volt|current/i, color: '#eab308', icon: '⚡' },
+  { match: /door|access|lock/i, color: '#ec4899', icon: '🚪' },
+];
+
+const MODEL_FALLBACK_COLORS = ['#818cf8', '#f472b6', '#4ade80', '#fb923c', '#2dd4bf', '#c084fc'];
+
+function hashModelKey(key: string): number {
+  let hash = 0;
+  for (let i = 0; i < key.length; i += 1) {
+    hash = (hash * 31 + key.charCodeAt(i)) >>> 0;
+  }
+  return hash;
+}
+
+export function modelStyle(modelKey: string): ModelStyle {
+  if (modelKey === OTHER_MODEL_KEY) return { color: '#64748b', icon: '📦' };
+  const rule = MODEL_STYLE_RULES.find(r => r.match.test(modelKey));
+  if (rule) return { color: rule.color, icon: rule.icon };
+  const color = MODEL_FALLBACK_COLORS[hashModelKey(modelKey) % MODEL_FALLBACK_COLORS.length];
+  return { color, icon: '🔧' };
+}
+
+/** `#2563eb` -> `rgba(37,99,235,0.16)`  used to tint chip/badge backgrounds
+ * with a model's accent colour without hardcoding a second palette. */
+export function hexToRgba(hex: string, alpha: number): string {
+  const clean = hex.replace('#', '');
+  const bigint = parseInt(
+    clean.length === 3
+      ? clean.split('').map(c => c + c).join('')
+      : clean,
+    16,
+  );
+  const r = (bigint >> 16) & 255;
+  const g = (bigint >> 8) & 255;
+  const b = bigint & 255;
+  return `rgba(${r},${g},${b},${alpha})`;
+}
+
 /** "Aelita2S-002" instead of "urn:ngsi-v2:Coolon-Light:Aelita2S-002" — the
  * one place every sensor-name display in the UI should go through. */
 export function sensorDisplayName(device: {

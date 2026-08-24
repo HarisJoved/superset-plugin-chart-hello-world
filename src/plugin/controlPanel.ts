@@ -247,7 +247,7 @@ const config: ControlPanelConfig = {
             name: 'header_text',
             config: {
               type: 'TextControl',
-              default: '3D Device Viewer',
+              default: '3D Viewer',
               renderTrigger: true,
               label: t('Header Text'),
               description: t('Optional caption overlaid on the viewer'),
