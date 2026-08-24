@@ -24,6 +24,8 @@ import {
   severityColor,
   statusColor,
 } from './alertsApi';
+import { AlertDetailModal } from './AlertDetailModal';
+import { PanelId, PanelNav } from './PanelNav';
 
 // Keeps the "Live" badge honest without hammering the endpoint — alerts are
 // a slow-moving feed (device-triggered events, not a tick-by-tick stream).
@@ -31,14 +33,16 @@ const AUTO_REFRESH_MS = 60000;
 const ROWS_PER_PAGE_OPTIONS = [10, 25, 50, 100];
 
 interface AlertsPanelProps {
-  onClose: () => void;
+  activePanel: PanelId;
+  onNavigate: (panel: PanelId) => void;
 }
 
-export function AlertsPanel({ onClose }: AlertsPanelProps) {
+export function AlertsPanel({ activePanel, onNavigate }: AlertsPanelProps) {
   const [alerts, setAlerts] = useState<AlertRecord[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
   const [lastFetchedAt, setLastFetchedAt] = useState<number | null>(null);
+  const [selectedAlert, setSelectedAlert] = useState<AlertRecord | null>(null);
 
   const [search, setSearch] = useState('');
   const [severityFilter, setSeverityFilter] = useState('__all__');
@@ -162,9 +166,13 @@ export function AlertsPanel({ onClose }: AlertsPanelProps) {
           flexWrap: 'wrap',
         }}
       >
-        <button type="button" onClick={onClose} style={backButtonStyle}>
-          ← Back to 3D view
-        </button>
+        <PanelNav
+          active={activePanel}
+          onNavigate={onNavigate}
+          alertCount={alerts.length}
+          variant="dark"
+          menuDirection="down"
+        />
 
         <div style={{ fontSize: 18, fontWeight: 700 }}>Mining Dashboard Alerts</div>
 
@@ -325,7 +333,11 @@ export function AlertsPanel({ onClose }: AlertsPanelProps) {
                 const sev = severityColor(alert.severity);
                 const stat = statusColor(alert.status);
                 return (
-                  <tr key={alert.id} style={{ borderBottom: '1px solid #1a212c' }}>
+                  <tr
+                    key={alert.id}
+                    onClick={() => setSelectedAlert(alert)}
+                    style={{ borderBottom: '1px solid #1a212c', cursor: 'pointer' }}
+                  >
                     <td style={tdStyle}>
                       <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
                         <span
@@ -446,20 +458,21 @@ export function AlertsPanel({ onClose }: AlertsPanelProps) {
           Last refreshed {new Date(lastFetchedAt).toLocaleTimeString()}
         </div>
       )}
+
+      {selectedAlert && (
+        <AlertDetailModal
+          alert={selectedAlert}
+          onClose={() => setSelectedAlert(null)}
+          onResolved={alertId => {
+            setAlerts(prev =>
+              prev.map(a => (a.id === alertId ? { ...a, status: 'resolved' } : a)),
+            );
+          }}
+        />
+      )}
     </div>
   );
 }
-
-const backButtonStyle: React.CSSProperties = {
-  padding: '7px 12px',
-  fontSize: 12,
-  fontWeight: 600,
-  color: '#e2e8f0',
-  background: '#1a212c',
-  border: '1px solid #2a3341',
-  borderRadius: 8,
-  cursor: 'pointer',
-};
 
 const iconButtonStyle: React.CSSProperties = {
   padding: '6px 10px',

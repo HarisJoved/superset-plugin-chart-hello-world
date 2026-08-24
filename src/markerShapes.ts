@@ -44,12 +44,34 @@ export interface MarkerShapeOption {
 export const MARKER_SHAPE_OPTIONS: MarkerShapeOption[] = [
   { id: 'sphere', label: 'Sphere', description: 'Plain sphere — works for any sensor.' },
   { id: 'pin', label: 'Pin', description: 'Map-pin, tip sits exactly on the sensor.' },
-  { id: 'light', label: 'Light sensor', description: 'Bulb with rays.' },
-  { id: 'dust', label: 'Dust / air sensor', description: 'Core with a scattered particle cloud.' },
-  { id: 'noise', label: 'Noise sensor', description: 'Core with expanding sound rings.' },
-  { id: 'cube', label: 'Cube', description: 'Simple cube marker.' },
-  { id: 'diamond', label: 'Diamond', description: 'Faceted octahedron marker.' },
+  { id: 'light', label: 'Light sensor', description: 'Streetlight bulb — grey and dark by day, glowing amber with rays at night.' },
+  { id: 'dust', label: 'Dust / air sensor', description: 'Core with a drifting particle cloud.' },
+  { id: 'noise', label: 'Noise sensor', description: 'Speaker cone with expanding sound rings.' },
+  { id: 'cube', label: 'Cube', description: 'Boxy sensor housing with an edge outline.' },
+  { id: 'diamond', label: 'Diamond', description: 'Faceted octahedron with an equatorial band.' },
 ];
+
+/**
+ * Sensible starting colour per shape, used when a model hasn't had a colour
+ * explicitly set in the placement editor — so a freshly-assigned "Noise
+ * sensor" shape reads as purple out of the box instead of every unstyled
+ * model defaulting to the same generic blue.
+ *
+ * "light" is a fixed exception: it ignores whatever colour it's given
+ * entirely and always renders grey by day / amber by night (see
+ * `buildLight`) — its entry here exists only so the model-colour swatch in
+ * the placement editor has something sane to show, not because it affects
+ * the marker's actual on-screen colour.
+ */
+export const DEFAULT_SHAPE_COLORS: Record<MarkerShapeId, string> = {
+  sphere: '#2563eb',
+  pin: '#ef4444',
+  light: '#fbbf24',
+  dust: '#a8a29e',
+  noise: '#8b5cf6',
+  cube: '#0ea5e9',
+  diamond: '#06b6d4',
+};
 
 export interface BuiltMarker {
   /** Root object — position this at the device's location and add it to
@@ -103,11 +125,19 @@ function buildSphere(color: THREE.Color, radius: number): BuiltMarker {
 function buildCube(color: THREE.Color, radius: number): BuiltMarker {
   const group = new THREE.Group();
   const size = radius * 1.6;
-  const coreMesh = new THREE.Mesh(
-    new THREE.BoxGeometry(size, size, size),
-    coreMaterial(color),
-  );
+  const geometry = new THREE.BoxGeometry(size, size, size);
+  const coreMesh = new THREE.Mesh(geometry, coreMaterial(color));
   group.add(coreMesh);
+
+  // A thin edge outline reads as a housing/casing rather than a flat-shaded
+  // block — cheap (one extra line object) and makes the cube legible even
+  // when it's small on screen.
+  const edges = new THREE.LineSegments(
+    new THREE.EdgesGeometry(geometry),
+    new THREE.LineBasicMaterial({ color: '#0f172a', transparent: true, opacity: 0.35 }),
+  );
+  group.add(edges);
+
   return { group, coreMesh };
 }
 
@@ -118,6 +148,16 @@ function buildDiamond(color: THREE.Color, radius: number): BuiltMarker {
     coreMaterial(color),
   );
   group.add(coreMesh);
+
+  // A thin equatorial band gives the facets something to catch the light
+  // against, instead of reading as a flat grey diamond from a distance.
+  const band = new THREE.Mesh(
+    new THREE.TorusGeometry(radius * 1.05, radius * 0.05, 8, 24),
+    decorationMaterial(color, 0.6),
+  );
+  band.rotation.x = Math.PI / 2;
+  group.add(band);
+
   return { group, coreMesh };
 }
 
@@ -148,24 +188,43 @@ function buildPin(color: THREE.Color, radius: number): BuiltMarker {
   return { group, coreMesh };
 }
 
-/** Bulb with rays radiating out from the equator — a light/lighting sensor.
- * At night it glows (pulsing emissive, slowly spinning rays); by day it
- * reads as switched off, same as a real streetlight would. */
-function buildLight(color: THREE.Color, radius: number): BuiltMarker {
+/**
+ * Streetlight bulb with rays radiating from the equator — a light sensor.
+ * This is the one shape with genuinely different geometRy/colour behaviour
+ * for day vs night, not just an animation: by day it's a dull grey bulb
+ * with no rays at all (switched off), by night it turns amber, glows, and
+ * spins its rays slowly. The colour it's constructed with is intentionally
+ * ignored for the bulb/rays themselves — see `DEFAULT_SHAPE_COLORS` — only
+ * the dark fixture housing stays neutral regardless of day/night.
+ */
+function buildLight(_color: THREE.Color, radius: number): BuiltMarker {
   const group = new THREE.Group();
-  const material = coreMaterial(color);
+  const DAY_COLOR = new THREE.Color('#9ca3af');
+  const NIGHT_COLOR = new THREE.Color('#fde047');
+
+  const material = new THREE.MeshStandardMaterial({
+    color: DAY_COLOR.clone(),
+    emissive: DAY_COLOR.clone(),
+    emissiveIntensity: 0.05,
+    roughness: 0.5,
+  });
   const coreMesh = new THREE.Mesh(new THREE.SphereGeometry(radius, 16, 16), material);
   group.add(coreMesh);
 
+  // Small dark fixture housing beneath the bulb — reads as a real light
+  // fitting rather than a bare glowing ball, and doesn't change with
+  // day/night since a fixture's casing doesn't glow either way.
+  const housing = new THREE.Mesh(
+    new THREE.CylinderGeometry(radius * 0.45, radius * 0.6, radius * 0.4, 10),
+    new THREE.MeshStandardMaterial({ color: '#334155', roughness: 0.7 }),
+  );
+  housing.position.set(0, -radius * 0.95, 0);
+  group.add(housing);
+
   const rayCount = 8;
   const rayLength = radius * 0.9;
-  const rayGeometry = new THREE.CylinderGeometry(
-    radius * 0.06,
-    radius * 0.06,
-    rayLength,
-    6,
-  );
-  const rayMaterial = decorationMaterial(color, 0.85);
+  const rayGeometry = new THREE.CylinderGeometry(radius * 0.06, radius * 0.06, rayLength, 6);
+  const rayMaterial = decorationMaterial(NIGHT_COLOR.clone(), 0.85);
   const rayGroup = new THREE.Group();
   for (let i = 0; i < rayCount; i += 1) {
     const angle = (i / rayCount) * Math.PI * 2;
@@ -179,17 +238,26 @@ function buildLight(color: THREE.Color, radius: number): BuiltMarker {
     ray.rotation.y = -angle;
     rayGroup.add(ray);
   }
+  // Rays exist only at night — by day the light is switched off, so there's
+  // nothing radiating out from it at all, not just a dim version of it.
+  rayGroup.visible = false;
   group.add(rayGroup);
 
-  const DAY_EMISSIVE = 0.06;
   const update = (elapsed: number, isNight: boolean) => {
+    // Smoothly fades the bulb colour between day/night rather than
+    // snapping, so flipping the toggle doesn't look like a hard cut.
+    const target = isNight ? NIGHT_COLOR : DAY_COLOR;
+    material.color.lerp(target, 0.08);
+    material.emissive.lerp(target, 0.08);
+
     if (isNight) {
-      material.emissiveIntensity = 0.6 + Math.sin(elapsed * 3) * 0.25;
-      rayMaterial.opacity = 0.65 + Math.sin(elapsed * 3) * 0.2;
+      material.emissiveIntensity = 0.55 + Math.sin(elapsed * 3) * 0.25;
+      rayGroup.visible = true;
+      rayMaterial.opacity = 0.7 + Math.sin(elapsed * 3) * 0.2;
       rayGroup.rotation.y = elapsed * 0.15;
     } else {
-      material.emissiveIntensity = DAY_EMISSIVE;
-      rayMaterial.opacity = 0.12;
+      material.emissiveIntensity = 0.05;
+      rayGroup.visible = false;
     }
   };
 
@@ -253,14 +321,18 @@ function buildDust(color: THREE.Color, radius: number): BuiltMarker {
   return { group, coreMesh, update };
 }
 
-/** Core plus two flat rings that pulse outward and fade like sonar pings —
- * a noise / audio sensor. */
+/** Speaker cone plus two flat rings that pulse outward and fade like sonar
+ * pings — a noise / audio sensor. */
 function buildNoise(color: THREE.Color, radius: number): BuiltMarker {
   const group = new THREE.Group();
+  // A cone reads as "speaker" far more than a plain sphere did — flipped to
+  // point outward (+Z) rather than up, since markers are usually viewed
+  // from roughly eye level rather than from directly overhead.
   const coreMesh = new THREE.Mesh(
-    new THREE.SphereGeometry(radius * 0.65, 14, 14),
+    new THREE.ConeGeometry(radius * 0.55, radius * 1.1, 12),
     coreMaterial(color),
   );
+  coreMesh.rotation.x = Math.PI / 2;
   group.add(coreMesh);
 
   const inner = radius * 1.1;

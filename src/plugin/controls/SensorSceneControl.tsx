@@ -29,6 +29,7 @@ import {
 import { parseSensorId, resolveNgsiId } from '../../api';
 import {
   DEFAULT_MARKER_SHAPE,
+  DEFAULT_SHAPE_COLORS,
   MARKER_SHAPE_OPTIONS,
   MarkerShapeId,
 } from '../../markerShapes';
@@ -48,13 +49,13 @@ const UNGROUPED_KEY = '__ungrouped__';
 /** Normalises whatever came out of the JSON into a `#rrggbb` value that
  * `<input type="color">` will accept — it silently falls back to black for
  * anything else, which looks like a bug to the user. */
-function toHexColor(raw: unknown): string {
+function toHexColor(raw: unknown, fallback: string = DEFAULT_COLOR): string {
   if (typeof raw === 'string' && /^#[0-9a-fA-F]{6}$/.test(raw)) return raw;
   if (typeof raw === 'string' && /^#[0-9a-fA-F]{3}$/.test(raw)) {
     const [, r, g, b] = raw;
     return `#${r}${r}${g}${g}${b}${b}`;
   }
-  return DEFAULT_COLOR;
+  return fallback;
 }
 
 /**
@@ -582,7 +583,11 @@ export default function SensorSceneControl({
           {modelGroups.map(group => {
             const groupExpanded = group.key === expandedModel;
             const groupPlaced = group.sensors.filter(isPlaced).length;
-            const groupColor = toHexColor(group.sensors[0]?.markerColor);
+            const groupShape = scene?.modelShapes?.[group.key] ?? DEFAULT_MARKER_SHAPE;
+            const groupColor = toHexColor(
+              group.sensors[0]?.markerColor,
+              DEFAULT_SHAPE_COLORS[groupShape],
+            );
             const groupSize = group.sensors[0]?.markerSize ?? bounds.fallback;
 
             return (
@@ -646,38 +651,55 @@ export default function SensorSceneControl({
 
                 {groupExpanded && (
                   <div style={{ padding: '8px', borderTop: '1px solid #e2e8f0' }}>
-                    <div style={rowStyle}>
-                      <span style={fieldLabelStyle}>Colour</span>
-                      <input
-                        type="color"
-                        value={groupColor}
-                        onChange={e =>
-                          applyStyleToGroup(group.sensors, {
-                            markerColor: e.target.value,
-                          })
-                        }
+                    {groupShape === 'light' ? (
+                      <div
                         style={{
-                          width: 34,
-                          height: 24,
-                          padding: 0,
-                          border: '1px solid #d9dbe4',
+                          fontSize: 10,
+                          color: '#8e94a1',
+                          background: '#f8fafc',
+                          border: '1px solid #e2e8f0',
                           borderRadius: 4,
-                          background: 'none',
-                          cursor: 'pointer',
-                          flexShrink: 0,
+                          padding: '6px 8px',
+                          marginBottom: 8,
                         }}
-                      />
-                      <input
-                        type="text"
-                        value={groupColor}
-                        onChange={e =>
-                          applyStyleToGroup(group.sensors, {
-                            markerColor: e.target.value,
-                          })
-                        }
-                        style={{ ...numberInputStyle, width: 74, flexShrink: 0 }}
-                      />
-                    </div>
+                      >
+                        Light markers use a fixed grey (day) / amber (night) glow — colour
+                        isn&apos;t customisable for this shape.
+                      </div>
+                    ) : (
+                      <div style={rowStyle}>
+                        <span style={fieldLabelStyle}>Colour</span>
+                        <input
+                          type="color"
+                          value={groupColor}
+                          onChange={e =>
+                            applyStyleToGroup(group.sensors, {
+                              markerColor: e.target.value,
+                            })
+                          }
+                          style={{
+                            width: 34,
+                            height: 24,
+                            padding: 0,
+                            border: '1px solid #d9dbe4',
+                            borderRadius: 4,
+                            background: 'none',
+                            cursor: 'pointer',
+                            flexShrink: 0,
+                          }}
+                        />
+                        <input
+                          type="text"
+                          value={groupColor}
+                          onChange={e =>
+                            applyStyleToGroup(group.sensors, {
+                              markerColor: e.target.value,
+                            })
+                          }
+                          style={{ ...numberInputStyle, width: 74, flexShrink: 0 }}
+                        />
+                      </div>
+                    )}
 
                     <div style={rowStyle}>
                       <span style={fieldLabelStyle}>Size</span>

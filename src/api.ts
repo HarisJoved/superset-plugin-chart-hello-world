@@ -155,6 +155,31 @@ function buildQuery(params: Record<string, string | number | undefined>): string
 }
 
 /**
+ * Every fetch to the IoT gateway goes through this — a plain `fetch()` has
+ * no timeout, so a slow or silently-hanging gateway response (which is
+ * exactly what happens if it's rate-limiting a burst of concurrent
+ * requests, e.g. the Devices table paging in 20 sensors' latest readings
+ * at once) leaves the caller "loading" forever with nothing to show for
+ * it. This guarantees the promise settles one way or another.
+ */
+const REQUEST_TIMEOUT_MS = 15000;
+
+async function fetchWithTimeout(url: string, timeoutMs = REQUEST_TIMEOUT_MS): Promise<Response> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    return await fetch(url, { signal: controller.signal });
+  } catch (e) {
+    if (e instanceof Error && e.name === 'AbortError') {
+      throw new Error(`Request timed out after ${Math.round(timeoutMs / 1000)}s`);
+    }
+    throw e;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+/**
  * device_id and model_name go straight into the URL path unencoded (as in
  * the example calls) since they're NGSI URNs like
  * "urn:ngsi-v2:Coolon-Light:Aelita2S-001" and encoding the colons breaks
@@ -167,7 +192,7 @@ export async function fetchLatestDeviceData(
     broker: BROKER,
     userId: USER_ID,
   })}`;
-  const res = await fetch(url);
+  const res = await fetchWithTimeout(url);
   if (!res.ok) {
     throw new Error(`Latest data request failed (${res.status})`);
   }
@@ -249,7 +274,9 @@ export async function fetchDeviceHistory(
     limit: limit ?? 2000,
   });
   const url = `${API_BASE}/iot-agent/history/devices/${deviceId}/${modelName}${query}`;
-  const res = await fetch(url);
+  // History payloads can be a lot bigger than a "latest" snapshot (up to
+  // `limit` observations), so this gets a longer timeout than the default.
+  const res = await fetchWithTimeout(url, 25000);
   if (!res.ok) {
     throw new Error(`History request failed (${res.status})`);
   }
@@ -306,6 +333,30 @@ export function deriveModelName(ngsiId: string, explicit?: string): string {
 
 export function formatAttrLabel(key: string): string {
   return key.replace(/_/g, ' ');
+}
+
+/** Small icon for an attribute, guessed from its key — purely cosmetic, so
+ * an unrecognised key just falls back to a plain bullet rather than
+ * breaking anything. */
+export function attrIcon(key: string): string {
+  const k = key.toLowerCase();
+  if (k.includes('brightness') || k.includes('light_level') || k.includes('lux')) return '💡';
+  if (k.includes('humid')) return '💧';
+  if (k.includes('temp')) return '🌡️';
+  if (k.includes('pressure')) return '📊';
+  if (k.includes('noise') || k.includes('sound') || k.includes('_db') || k === 'db') return '🔊';
+  if (k.includes('motion')) return '🚶';
+  if (k.includes('power_source')) return '🔌';
+  if (k.includes('power') || k.includes('voltage') || k.includes('current')) return '⚡';
+  if (k.includes('battery')) return '🔋';
+  if (k.includes('online') || k.includes('connected') || k.includes('uptime')) return '⏱️';
+  if (k.includes('dust') || k.includes('pm10') || k.includes('pm25') || k.includes('particulate')) return '🌫️';
+  if (k.includes('water') || k.includes('flow') || k.includes('flood')) return '💦';
+  if (k.includes('wind')) return '🍃';
+  if (k.includes('co2') || k.includes('gas') || k.includes('air_quality') || k === 'aqi') return '🌬️';
+  if (k.includes('location') || k.includes('gps') || k.includes('latitude') || k.includes('longitude')) return '📍';
+  if (k.includes('uv')) return '☀️';
+  return '•';
 }
 
 const ISO_DATE_RE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}/;

@@ -50,9 +50,10 @@ import {
   deviceModelKey,
   sensorDisplayName as displayName,
 } from './api';
-import { buildMarkerShape } from './markerShapes';
+import { DEFAULT_MARKER_SHAPE, DEFAULT_SHAPE_COLORS, MarkerShapeId, buildMarkerShape } from './markerShapes';
 import { DevicesPanel } from './DevicesPanel';
 import { AlertsPanel } from './AlertsPanel';
+import { PanelId, PanelNav } from './PanelNav';
 
 /** Fallback world size used to derive marker/label scale before a model has
  * loaded (or when the scene has no model at all). */
@@ -92,13 +93,13 @@ const filterSelectStyle: React.CSSProperties = {
  * legitimately reaches us; THREE would log an "Unknown color" warning per
  * marker per keystroke and render it black.
  */
-function markerColorOf(device: DeviceDatum): string {
-  if (typeof device.markerColor !== 'string') return FALLBACK_MARKER_COLOR;
+function markerColorOf(device: DeviceDatum, fallback: string = FALLBACK_MARKER_COLOR): string {
+  if (typeof device.markerColor !== 'string') return fallback;
   const value = device.markerColor.trim();
   if (/^#(?:[0-9a-f]{3}|[0-9a-f]{6})$/i.test(value)) return value;
   // CSS named colours ("red", "steelblue") are valid THREE input too.
   if (/^[a-z]+$/i.test(value)) return value;
-  return FALLBACK_MARKER_COLOR;
+  return fallback;
 }
 
 /**
@@ -188,8 +189,10 @@ function buildDeviceGroup(
         ? device.markerSize
         : defaultRadius;
 
-    const color = new THREE.Color(markerColorOf(device));
-    const shapeId = modelShapes?.[deviceModelKey(device)];
+    const shapeId = (modelShapes?.[deviceModelKey(device)] as MarkerShapeId) || DEFAULT_MARKER_SHAPE;
+    const color = new THREE.Color(
+      markerColorOf(device, DEFAULT_SHAPE_COLORS[shapeId] || FALLBACK_MARKER_COLOR),
+    );
     const { group: markerGroup, coreMesh, update } = buildMarkerShape(shapeId, color, radius);
     markerGroup.position.copy(pos);
     coreMesh.userData.device = device;
@@ -299,8 +302,7 @@ export default function SupersetPluginChartHelloWorld(
   const [locationFilter, setLocationFilter] = useState<string>('');
   const [searchQuery, setSearchQuery] = useState('');
   const [searchOpen, setSearchOpen] = useState(false);
-  const [devicesPanelOpen, setDevicesPanelOpen] = useState(false);
-  const [alertsPanelOpen, setAlertsPanelOpen] = useState(false);
+  const [activePanel, setActivePanel] = useState<PanelId>('3d');
   const [isNight, setIsNight] = useState(false);
 
   const fontSizes: Record<string, string> = {
@@ -1455,51 +1457,27 @@ export default function SupersetPluginChartHelloWorld(
           bottom: 12,
           left: 16,
           zIndex: 3,
-          display: 'flex',
-          gap: 8,
         }}
       >
-        {devices.length > 0 && (
-          <button
-            type="button"
-            onClick={() => setDevicesPanelOpen(true)}
-            style={{
-              padding: '6px 12px',
-              fontSize: 11,
-              fontWeight: 700,
-              color: 'white',
-              background: '#2563eb',
-              border: 'none',
-              borderRadius: 6,
-              cursor: 'pointer',
-            }}
-          >
-            ☰ Devices ({devices.length})
-          </button>
-        )}
-        <button
-          type="button"
-          onClick={() => setAlertsPanelOpen(true)}
-          style={{
-            padding: '6px 12px',
-            fontSize: 11,
-            fontWeight: 700,
-            color: 'white',
-            background: '#dc2626',
-            border: 'none',
-            borderRadius: 6,
-            cursor: 'pointer',
-          }}
-        >
-          ⚠ Alerts
-        </button>
+        <PanelNav
+          active="3d"
+          onNavigate={setActivePanel}
+          deviceCount={devices.length}
+          variant="light"
+        />
       </div>
 
-      {devicesPanelOpen && (
-        <DevicesPanel devices={devices} onClose={() => setDevicesPanelOpen(false)} />
+      {activePanel === 'devices' && (
+        <DevicesPanel
+          devices={devices}
+          activePanel={activePanel}
+          onNavigate={setActivePanel}
+        />
       )}
 
-      {alertsPanelOpen && <AlertsPanel onClose={() => setAlertsPanelOpen(false)} />}
+      {activePanel === 'alerts' && (
+        <AlertsPanel activePanel={activePanel} onNavigate={setActivePanel} />
+      )}
 
       <div ref={containerRef} style={{ width: '100%', height: '100%' }} />
     </div>

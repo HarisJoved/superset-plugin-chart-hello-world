@@ -16,13 +16,14 @@
  * specific language governing permissions and limitations
  * under the License.
  */
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { DeviceDatum } from './types';
 import {
   HistoryPoint,
   HistoryResult,
   LatestDeviceData,
   OTHER_MODEL_KEY,
+  attrIcon,
   deriveModelName,
   deviceModelKey,
   fetchDeviceHistory,
@@ -33,16 +34,18 @@ import {
   sensorDisplayName,
 } from './api';
 import { AttributeAreaChart, formatLastUpdated, formatTick } from './SensorPanels';
+import { PanelId, PanelNav } from './PanelNav';
 
 const PAGE_SIZE = 20;
-const MAX_TABLE_ATTR_COLUMNS = 4;
+const MAX_TABLE_ATTR_COLUMNS = 8;
 const COMPARE_COLORS = ['#2563eb', '#dc2626', '#16a34a', '#d97706', '#7c3aed', '#0891b2', '#db2777', '#65a30d'];
 
 interface DevicesPanelProps {
-  /** Every sensor the chart knows about — not just the placed ones, since
+  /** Every sensor the chart knows about  not just the placed ones, since
    * the table is a data-browsing tool independent of 3D placement. */
   devices: DeviceDatum[];
-  onClose: () => void;
+  activePanel: PanelId;
+  onNavigate: (panel: PanelId) => void;
 }
 
 type LatestEntry = { loading: boolean; data?: LatestDeviceData; error?: string };
@@ -50,10 +53,10 @@ type LatestEntry = { loading: boolean; data?: LatestDeviceData; error?: string }
 /**
  * Full-screen table view of every sensor: search, filter by model, drill
  * into one sensor's history, or compare several same-model sensors'
- * history side by side. Sits on top of the 3D viewer as an overlay rather
- * than replacing it, so "back to 3D" is just closing this.
+ * history side by side. Sits on top of the 3D viewer as an overlay; the
+ * shared PanelNav (bottom-left) is how you get back or over to Alerts.
  */
-export function DevicesPanel({ devices, onClose }: DevicesPanelProps) {
+export function DevicesPanel({ devices, activePanel, onNavigate }: DevicesPanelProps) {
   const [search, setSearch] = useState('');
   const [modelFilter, setModelFilter] = useState<string>('__all__');
   const [page, setPage] = useState(0);
@@ -81,6 +84,19 @@ export function DevicesPanel({ devices, onClose }: DevicesPanelProps) {
     }));
   }, [devices]);
 
+  // The table opening on a flat, unfiltered "everything" list isn't useful 
+  // there's no shared attribute schema across models to show columns for.
+  // Default to whichever model has the most sensors instead, once (a
+  // ref, not state, so it only fires the first time chips become
+  // available and never fights the user's own filter choice afterwards).
+  const defaultFilterAppliedRef = useRef(false);
+  useEffect(() => {
+    if (defaultFilterAppliedRef.current || modelChips.length === 0) return;
+    defaultFilterAppliedRef.current = true;
+    const largest = modelChips.reduce((a, b) => (b.count > a.count ? b : a), modelChips[0]);
+    setModelFilter(largest.key);
+  }, [modelChips]);
+
   const filtered = useMemo(() => {
     const q = search.trim().toLowerCase();
     return devices.filter(d => {
@@ -94,7 +110,7 @@ export function DevicesPanel({ devices, onClose }: DevicesPanelProps) {
   }, [devices, search, modelFilter]);
 
   // A filter/search change can leave `page` pointing past the new, shorter
-  // list — snap back to the first page rather than showing an empty table.
+  // list  snap back to the first page rather than showing an empty table.
   useEffect(() => {
     setPage(0);
   }, [search, modelFilter]);
@@ -104,30 +120,52 @@ export function DevicesPanel({ devices, onClose }: DevicesPanelProps) {
   const pageRows = filtered.slice(safePage * PAGE_SIZE, safePage * PAGE_SIZE + PAGE_SIZE);
 
   // Lazily fetch "latest reading" for whatever's on the current page, a few
-  // at a time — firing one request per sensor for a fleet of hundreds would
+  // at a time  firing one request per sensor for a fleet of hundreds would
   // either hang the tab or get rate-limited. Already-fetched rows (tracked
   // in `latestById`, which persists across page changes) are skipped.
+  //
+  // Waits for the default-model-filter effect above to settle first: on
+  // mount, `pageRows` briefly holds every device across every model before
+  // that effect narrows it down. Starting real fetches against that
+  // transient, about-to-be-replaced list was wasted work  and, worse, it's
+  // what caused rows to get stuck on "&" forever (see below).
   useEffect(() => {
+    if (modelChips.length > 0 && !defaultFilterAppliedRef.current) return undefined;
+
     let cancelled = false;
     const toFetch = pageRows.filter(d => !latestById[d.deviceId]);
     if (toFetch.length === 0) return undefined;
 
-    setLatestById(prev => {
-      const next = { ...prev };
-      toFetch.forEach(d => {
-        next[d.deviceId] = { loading: true };
-      });
-      return next;
-    });
-
-    const CONCURRENCY = 5;
+    // Kept low and staggered on purpose: firing a burst of requests at the
+    // gateway (this was 5-at-once, unstaggered) appears to be exactly what
+    // triggers rows getting stuck on "&" forever  the IoT gateway seems to
+    // rate-limit or silently drop concurrent bursts rather than queueing
+    // them, and a plain `fetch()` with no timeout just hangs when that
+    // happens (see `fetchWithTimeout` in api.ts for the other half of this
+    // fix). 3 workers, staggered 120ms apart, is a lot gentler.
+    //
+    // Crucially, each device is only marked `{ loading: true }` right
+    // before its worker actually issues the request  not eagerly for the
+    // whole batch up front. Marking the whole batch loading immediately
+    // used to mean that if this effect got cancelled (e.g. the model
+    // filter changing) before a staggered worker reached its turn, that
+    // device already "had an entry" in `latestById` and so `toFetch` above
+    // would skip it on every future run  stranding it on "&" forever even
+    // though its request never actually went out.
+    const CONCURRENCY = 3;
+    const STAGGER_MS = 120;
     let cursor = 0;
-    async function worker() {
+    async function worker(startDelay: number) {
+      if (startDelay > 0) {
+        await new Promise(resolve => setTimeout(resolve, startDelay));
+      }
       for (;;) {
+        if (cancelled) return;
         const index = cursor;
         cursor += 1;
         if (index >= toFetch.length) return;
         const device = toFetch[index];
+        setLatestById(prev => ({ ...prev, [device.deviceId]: { loading: true } }));
         try {
           const data = await fetchLatestDeviceData(resolveNgsiId(device));
           if (cancelled) return;
@@ -144,7 +182,8 @@ export function DevicesPanel({ devices, onClose }: DevicesPanelProps) {
         }
       }
     }
-    const workers = Array.from({ length: Math.min(CONCURRENCY, toFetch.length) }, worker);
+    const workerCount = Math.min(CONCURRENCY, toFetch.length);
+    const workers = Array.from({ length: workerCount }, (_, i) => worker(i * STAGGER_MS));
     Promise.all(workers);
     return () => {
       cancelled = true;
@@ -153,8 +192,14 @@ export function DevicesPanel({ devices, onClose }: DevicesPanelProps) {
   }, [pageRows.map(d => d.deviceId).join(',')]);
 
   const singleModelFilter = modelFilter !== '__all__';
+  // Attribute columns are now always derived from whatever's loaded for the
+  // current page, regardless of whether a single model is selected  a
+  // mixed page just ends up with the union of keys across models (capped),
+  // with '' in cells where a given device doesn't report that attribute.
+  // This is what actually puts the per-attribute columns (and their icons)
+  // on screen instead of the old squashed "Latest" summary cell, which is
+  // where they were going missing before.
   const attrColumns = useMemo(() => {
-    if (!singleModelFilter) return [];
     const keys: string[] = [];
     pageRows.forEach(d => {
       latestById[d.deviceId]?.data?.attributes.forEach(a => {
@@ -163,7 +208,7 @@ export function DevicesPanel({ devices, onClose }: DevicesPanelProps) {
     });
     return keys.slice(0, MAX_TABLE_ATTR_COLUMNS);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [pageRows, latestById, singleModelFilter]);
+  }, [pageRows, latestById]);
 
   const compareModelKey =
     compareSelection.length > 0
@@ -176,7 +221,7 @@ export function DevicesPanel({ devices, onClose }: DevicesPanelProps) {
         return prev.filter(id => id !== device.deviceId);
       }
       if (prev.length > 0 && deviceModelKey(device) !== compareModelKey) {
-        // Silently ignore — the checkbox is disabled for this row anyway,
+        // Silently ignore  the checkbox is disabled for this row anyway,
         // but a row click could still reach here.
         return prev;
       }
@@ -214,9 +259,13 @@ export function DevicesPanel({ devices, onClose }: DevicesPanelProps) {
           flexWrap: 'wrap',
         }}
       >
-        <button type="button" onClick={onClose} style={backButtonStyle}>
-          ← Back to 3D view
-        </button>
+        <PanelNav
+          active={activePanel}
+          onNavigate={onNavigate}
+          deviceCount={devices.length}
+          variant="dark"
+          menuDirection="down"
+        />
 
         <div style={{ fontSize: 18, fontWeight: 700, marginRight: 4 }}>
           Devices ({devices.length})
@@ -226,7 +275,7 @@ export function DevicesPanel({ devices, onClose }: DevicesPanelProps) {
           type="text"
           value={search}
           onChange={e => setSearch(e.target.value)}
-          placeholder="Search devices…"
+          placeholder="Search devices&"
           style={searchInputStyle}
         />
 
@@ -248,13 +297,13 @@ export function DevicesPanel({ devices, onClose }: DevicesPanelProps) {
 
         {!compareMode ? (
           <button type="button" onClick={() => setCompareMode(true)} style={compareButtonStyle}>
-            ⇄ Compare
+            � Compare
           </button>
         ) : (
           <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
             <span style={{ fontSize: 12, color: '#94a3b8' }}>
               {compareSelection.length === 0
-                ? 'Select sensors of the same model…'
+                ? 'Select sensors of the same model&'
                 : `${compareSelection.length} selected`}
             </span>
             <button
@@ -287,20 +336,12 @@ export function DevicesPanel({ devices, onClose }: DevicesPanelProps) {
               <tr style={{ textAlign: 'left', color: '#94a3b8', fontSize: 11, textTransform: 'uppercase' }}>
                 {compareMode && <th style={theStyle}> </th>}
                 <th style={theStyle}>Device</th>
-                {singleModelFilter ? (
-                  <>
-                    {attrColumns.map(key => (
-                      <th key={key} style={theStyle}>
-                        {formatAttrLabel(key)}
-                      </th>
-                    ))}
-                  </>
-                ) : (
-                  <>
-                    <th style={theStyle}>Model</th>
-                    <th style={theStyle}>Latest</th>
-                  </>
-                )}
+                {!singleModelFilter && <th style={theStyle}>Model</th>}
+                {attrColumns.map(key => (
+                  <th key={key} style={theStyle}>
+                    {attrIcon(key)} {formatAttrLabel(key)}
+                  </th>
+                ))}
                 <th style={theStyle}>Last updated</th>
               </tr>
             </thead>
@@ -347,34 +388,39 @@ export function DevicesPanel({ devices, onClose }: DevicesPanelProps) {
                       )}
                     </td>
 
-                    {singleModelFilter ? (
-                      attrColumns.map(attrKey => {
-                        const attr = entry?.data?.attributes.find(a => a.key === attrKey);
-                        return (
-                          <td key={attrKey} style={tdStyle}>
-                            {entry?.loading ? '…' : attr ? formatAttrValue(attr.value) : '—'}
-                          </td>
-                        );
-                      })
-                    ) : (
-                      <>
-                        <td style={tdStyle}>{key === OTHER_MODEL_KEY ? '—' : key}</td>
-                        <td style={{ ...tdStyle, color: '#94a3b8', fontSize: 12 }}>
-                          {entry?.loading && '…'}
-                          {entry?.error && '—'}
-                          {entry?.data &&
-                            (entry.data.attributes.length === 0
-                              ? '—'
-                              : entry.data.attributes
-                                  .slice(0, 3)
-                                  .map(a => `${formatAttrLabel(a.key)}: ${formatAttrValue(a.value)}`)
-                                  .join('  ·  '))}
-                        </td>
-                      </>
+                    {!singleModelFilter && (
+                      <td style={tdStyle}>{key === OTHER_MODEL_KEY ? '' : key}</td>
                     )}
+                    {attrColumns.map(attrKey => {
+                      const attr = entry?.data?.attributes.find(a => a.key === attrKey);
+                      return (
+                        <td key={attrKey} style={tdStyle}>
+                          {entry?.loading ? (
+                            '&'
+                          ) : attr ? (
+                            <span>
+                              <span style={{ marginRight: 5 }}>{attrIcon(attrKey)}</span>
+                              {formatAttrValue(attr.value)}
+                            </span>
+                          ) : entry?.error ? (
+                            <span style={{ color: '#f87171' }} title={entry.error}>
+                              � failed
+                            </span>
+                          ) : (
+                            ''
+                          )}
+                        </td>
+                      );
+                    })}
 
                     <td style={{ ...tdStyle, fontSize: 12, color: '#64748b' }}>
-                      {entry?.data ? formatLastUpdated(entry.data.lastUpdated) : entry?.loading ? '…' : '—'}
+                      {entry?.data
+                        ? formatLastUpdated(entry.data.lastUpdated)
+                        : entry?.loading
+                          ? '&'
+                          : entry?.error
+                            ? '�'
+                            : ''}
                     </td>
                   </tr>
                 );
@@ -402,7 +448,7 @@ export function DevicesPanel({ devices, onClose }: DevicesPanelProps) {
             onClick={() => setPage(p => Math.max(0, p - 1))}
             style={{ ...backButtonStyle, opacity: safePage === 0 ? 0.4 : 1 }}
           >
-            ‹ Prev
+            9 Prev
           </button>
           <span style={{ color: '#94a3b8' }}>
             Page {safePage + 1} of {pageCount}
@@ -413,7 +459,7 @@ export function DevicesPanel({ devices, onClose }: DevicesPanelProps) {
             onClick={() => setPage(p => Math.min(pageCount - 1, p + 1))}
             style={{ ...backButtonStyle, opacity: safePage >= pageCount - 1 ? 0.4 : 1 }}
           >
-            Next ›
+            Next :
           </button>
         </div>
       )}
@@ -432,8 +478,61 @@ export function DevicesPanel({ devices, onClose }: DevicesPanelProps) {
   );
 }
 
+/** Shared Start/End date inputs + Filter button, styled for the drawers'
+ * dark background  same idea as the 3D view's SensorGraphModal filter row,
+ * just re-themed rather than reused since that one is light-on-white. */
+function DateRangeFilter({
+  from,
+  to,
+  onFromChange,
+  onToChange,
+  onApply,
+}: {
+  from: string;
+  to: string;
+  onFromChange: (v: string) => void;
+  onToChange: (v: string) => void;
+  onApply: () => void;
+}) {
+  return (
+    <div
+      style={{
+        display: 'flex',
+        gap: 12,
+        alignItems: 'flex-end',
+        flexWrap: 'wrap',
+        marginBottom: 16,
+        paddingBottom: 14,
+        borderBottom: '1px solid #1f2733',
+      }}
+    >
+      <label style={{ fontSize: 11, color: '#94a3b8' }}>
+        Start
+        <input
+          type="date"
+          value={from}
+          onChange={e => onFromChange(e.target.value)}
+          style={dateInputStyle}
+        />
+      </label>
+      <label style={{ fontSize: 11, color: '#94a3b8' }}>
+        End
+        <input
+          type="date"
+          value={to}
+          onChange={e => onToChange(e.target.value)}
+          style={dateInputStyle}
+        />
+      </label>
+      <button type="button" onClick={onApply} style={compareButtonStyle}>
+        Filter
+      </button>
+    </div>
+  );
+}
+
 /* ------------------------------------------------------------------ */
-/* Single-sensor history drawer — same data as the 3D view's graph     */
+/* Single-sensor history drawer  same data as the 3D view's graph     */
 /* modal, just reachable from the table instead of a marker click.     */
 /* ------------------------------------------------------------------ */
 
@@ -441,37 +540,38 @@ function HistoryDrawer({ device, onClose }: { device: DeviceDatum; onClose: () =
   const ngsiId = resolveNgsiId(device);
   const key = deviceModelKey(device);
   const modelName = deriveModelName(ngsiId, key === OTHER_MODEL_KEY ? undefined : key);
+  const [from, setFrom] = useState('');
+  const [to, setTo] = useState('');
   const [result, setResult] = useState<HistoryResult | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
 
-  useEffect(() => {
+  function load() {
     if (!modelName) {
       setError('Could not determine this sensor\u2019s model name.');
-      return undefined;
+      return;
     }
-    let cancelled = false;
     setLoading(true);
     setError('');
-    fetchDeviceHistory(ngsiId, modelName, { latest: 1 })
-      .then(r => {
-        if (!cancelled) setResult(r);
-      })
-      .catch((e: Error) => {
-        if (!cancelled) setError(e.message || 'Failed to load history.');
-      })
-      .finally(() => {
-        if (!cancelled) setLoading(false);
-      });
-    return () => {
-      cancelled = true;
-    };
+    fetchDeviceHistory(ngsiId, modelName, {
+      from: from || undefined,
+      to: to || undefined,
+      latest: from || to ? undefined : 1,
+    })
+      .then(r => setResult(r))
+      .catch((e: Error) => setError(e.message || 'Failed to load history.'))
+      .finally(() => setLoading(false));
+  }
+
+  useEffect(() => {
+    load();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [ngsiId, modelName]);
 
   return (
-    <Drawer onClose={onClose} title={`${sensorDisplayName(device)} — history`}>
-      {loading && <div style={{ color: '#94a3b8' }}>Loading…</div>}
+    <Drawer onClose={onClose} title={`${sensorDisplayName(device)}  history`}>
+      <DateRangeFilter from={from} to={to} onFromChange={setFrom} onToChange={setTo} onApply={load} />
+      {loading && <div style={{ color: '#94a3b8' }}>Loading&</div>}
       {!loading && error && <div style={{ color: '#f87171', fontSize: 12 }}>{error}</div>}
       {!loading && !error && result && (
         <>
@@ -479,11 +579,12 @@ function HistoryDrawer({ device, onClose }: { device: DeviceDatum; onClose: () =
             {result.recordCount} records
           </div>
           {result.series.length === 0 && (
-            <div style={{ color: '#64748b' }}>No numeric history available.</div>
+            <div style={{ color: '#64748b' }}>No numeric history in range.</div>
           )}
           {result.series.map(s => (
             <div key={s.attribute} style={{ marginBottom: 20 }}>
               <div style={{ fontWeight: 700, fontSize: 13, marginBottom: 6, color: '#e2e8f0' }}>
+                <span style={{ marginRight: 6 }}>{attrIcon(s.attribute)}</span>
                 {formatAttrLabel(s.attribute)}
               </div>
               <div style={{ background: 'white', borderRadius: 8, padding: 8 }}>
@@ -498,16 +599,17 @@ function HistoryDrawer({ device, onClose }: { device: DeviceDatum; onClose: () =
 }
 
 /* ------------------------------------------------------------------ */
-/* Compare drawer — same-model sensors' history overlaid per attribute */
+/* Compare drawer  same-model sensors' history overlaid per attribute */
 /* ------------------------------------------------------------------ */
 
 function CompareDrawer({ devices, onClose }: { devices: DeviceDatum[]; onClose: () => void }) {
+  const [from, setFrom] = useState('');
+  const [to, setTo] = useState('');
   const [byDevice, setByDevice] = useState<
     Record<string, { loading: boolean; result?: HistoryResult; error?: string }>
   >({});
 
-  useEffect(() => {
-    let cancelled = false;
+  function load() {
     setByDevice(Object.fromEntries(devices.map(d => [d.deviceId, { loading: true }])));
     devices.forEach(device => {
       const ngsiId = resolveNgsiId(device);
@@ -520,29 +622,32 @@ function CompareDrawer({ devices, onClose }: { devices: DeviceDatum[]; onClose: 
         }));
         return;
       }
-      fetchDeviceHistory(ngsiId, modelName, { latest: 1 })
+      fetchDeviceHistory(ngsiId, modelName, {
+        from: from || undefined,
+        to: to || undefined,
+        latest: from || to ? undefined : 1,
+      })
         .then(result => {
-          if (cancelled) return;
           setByDevice(prev => ({ ...prev, [device.deviceId]: { loading: false, result } }));
         })
         .catch((e: Error) => {
-          if (cancelled) return;
           setByDevice(prev => ({
             ...prev,
             [device.deviceId]: { loading: false, error: e.message || 'Failed to load' },
           }));
         });
     });
-    return () => {
-      cancelled = true;
-    };
+  }
+
+  useEffect(() => {
+    load();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [devices.map(d => d.deviceId).join(',')]);
 
   const anyLoading = devices.some(d => byDevice[d.deviceId]?.loading);
 
   // Union of attribute names across every device's series, in first-seen
-  // order — same-model sensors should report the same set, but this stays
+  // order  same-model sensors should report the same set, but this stays
   // correct even if one happens to be missing a reading.
   const attributes: string[] = [];
   devices.forEach(d => {
@@ -553,6 +658,7 @@ function CompareDrawer({ devices, onClose }: { devices: DeviceDatum[]; onClose: 
 
   return (
     <Drawer onClose={onClose} title={`Comparing ${devices.length} sensors`}>
+      <DateRangeFilter from={from} to={to} onFromChange={setFrom} onToChange={setTo} onApply={load} />
       <div style={{ display: 'flex', flexWrap: 'wrap', gap: 10, marginBottom: 16 }}>
         {devices.map((d, i) => (
           <div key={d.deviceId} style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 12 }}>
@@ -570,7 +676,7 @@ function CompareDrawer({ devices, onClose }: { devices: DeviceDatum[]; onClose: 
         ))}
       </div>
 
-      {anyLoading && <div style={{ color: '#94a3b8', marginBottom: 12 }}>Loading history…</div>}
+      {anyLoading && <div style={{ color: '#94a3b8', marginBottom: 12 }}>Loading history&</div>}
 
       {attributes.length === 0 && !anyLoading && (
         <div style={{ color: '#64748b' }}>No comparable numeric history available.</div>
@@ -579,6 +685,7 @@ function CompareDrawer({ devices, onClose }: { devices: DeviceDatum[]; onClose: 
       {attributes.map(attribute => (
         <div key={attribute} style={{ marginBottom: 24 }}>
           <div style={{ fontWeight: 700, fontSize: 13, marginBottom: 6, color: '#e2e8f0' }}>
+            <span style={{ marginRight: 6 }}>{attrIcon(attribute)}</span>
             {formatAttrLabel(attribute)}
           </div>
           <div style={{ background: 'white', borderRadius: 8, padding: 8 }}>
@@ -599,7 +706,7 @@ function CompareDrawer({ devices, onClose }: { devices: DeviceDatum[]; onClose: 
 }
 
 /** Multiple devices' readings for one attribute, overlaid as coloured lines
- * on a shared axis — the comparison view's equivalent of `AttributeAreaChart`. */
+ * on a shared axis  the comparison view's equivalent of `AttributeAreaChart`. */
 function MultiSeriesChart({
   series,
 }: {
@@ -689,8 +796,8 @@ function MultiSeriesChart({
           const avg = values.reduce((a, b) => a + b, 0) / values.length;
           return (
             <div key={s.label} style={{ fontSize: 11, color: '#475569' }}>
-              <span style={{ color: s.color, fontWeight: 700 }}>{s.label}</span>: min {min.toFixed(1)} · max{' '}
-              {max.toFixed(1)} · avg {avg.toFixed(1)}
+              <span style={{ color: s.color, fontWeight: 700 }}>{s.label}</span>: min {min.toFixed(1)} � max{' '}
+              {max.toFixed(1)} � avg {avg.toFixed(1)}
             </div>
           );
         })}
@@ -751,7 +858,7 @@ function Drawer({
             lineHeight: 1,
           }}
         >
-          ×
+          �
         </button>
       </div>
       <div style={{ flex: 1, overflowY: 'auto', padding: '16px 18px' }}>{children}</div>
@@ -789,6 +896,17 @@ const searchInputStyle: React.CSSProperties = {
   border: '1px solid #2a3341',
   borderRadius: 8,
   width: 200,
+};
+
+const dateInputStyle: React.CSSProperties = {
+  display: 'block',
+  marginTop: 4,
+  padding: '6px 8px',
+  borderRadius: 6,
+  border: '1px solid #2a3341',
+  background: '#1a212c',
+  color: '#e2e8f0',
+  fontSize: 12,
 };
 
 const chipStyle: React.CSSProperties = {

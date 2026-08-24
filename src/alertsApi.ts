@@ -22,8 +22,8 @@
  * (api.ts), this endpoint takes no broker/userId — it's called exactly as
  * given, with the sort/limit baked into the URL.
  */
-const ALERTS_URL =
-  'https://home.snap4idtcity.com/5508enb-y315/api/mining-dashboard-alerts?limit=1000&sortBy=createdAt&sortOrder=desc';
+const ALERTS_BASE = 'https://home.snap4idtcity.com/5508enb-y315/api/mining-dashboard-alerts';
+const ALERTS_URL = `${ALERTS_BASE}?limit=1000&sortBy=createdAt&sortOrder=desc`;
 
 export interface AlertRecord {
   id: string;
@@ -67,13 +67,9 @@ function str(v: unknown, fallback = ''): string {
   return typeof v === 'string' ? v : fallback;
 }
 
-export async function fetchAlerts(): Promise<AlertsResult> {
-  const res = await fetch(ALERTS_URL);
-  if (!res.ok) {
-    throw new Error(`Alerts request failed (${res.status})`);
-  }
-  const json = await res.json();
-  const rawAlerts: RawAlert[] = Array.isArray(json?.alerts) ? json.alerts : [];
+function parseAlertsResponse(json: unknown): AlertsResult {
+  const payload = json as { total?: unknown; count?: unknown; alerts?: unknown };
+  const rawAlerts: RawAlert[] = Array.isArray(payload?.alerts) ? (payload.alerts as RawAlert[]) : [];
 
   const alerts: AlertRecord[] = rawAlerts.map((a, i) => ({
     id: str(a._id, `alert-${i}`),
@@ -95,10 +91,37 @@ export async function fetchAlerts(): Promise<AlertsResult> {
   }));
 
   return {
-    total: typeof json?.total === 'number' ? json.total : alerts.length,
-    count: typeof json?.count === 'number' ? json.count : alerts.length,
+    total: typeof payload?.total === 'number' ? payload.total : alerts.length,
+    count: typeof payload?.count === 'number' ? payload.count : alerts.length,
     alerts,
   };
+}
+
+export async function fetchAlerts(): Promise<AlertsResult> {
+  const res = await fetch(ALERTS_URL);
+  if (!res.ok) {
+    throw new Error(`Alerts request failed (${res.status})`);
+  }
+  return parseAlertsResponse(await res.json());
+}
+
+/**
+ * "Other alerts from this device" — used by the alert detail modal. Sorted
+ * by dateObserved (not createdAt) per the given example call, so it reads
+ * as a timeline of when the underlying events actually happened.
+ */
+export async function fetchAlertsForDevice(
+  deviceId: string,
+  limit = 10,
+): Promise<AlertsResult> {
+  const url = `${ALERTS_BASE}?deviceId=${encodeURIComponent(
+    deviceId,
+  )}&limit=${limit}&sortBy=dateObserved&sortOrder=desc`;
+  const res = await fetch(url);
+  if (!res.ok) {
+    throw new Error(`Alerts request failed (${res.status})`);
+  }
+  return parseAlertsResponse(await res.json());
 }
 
 export function formatAlertDate(iso: string): string {
