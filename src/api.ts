@@ -416,7 +416,7 @@ export interface ModelStyle {
 
 const MODEL_STYLE_RULES: { match: RegExp; color: string; icon: string }[] = [
   { match: /weather|climate|env/i, color: '#38bdf8', icon: '☁️' },
-  { match: /light|lumin|lux|coolon/i, color: '#f59e0b', icon: '💡' },
+  { match: /light|lumin|lux/i, color: '#f59e0b', icon: '💡' },
   { match: /noise|sound|acoustic|audio/i, color: '#22c55e', icon: '🔊' },
   { match: /dust|particulate|pm\d/i, color: '#b45309', icon: '🌫️' },
   { match: /water|flow|flood|leak|moisture/i, color: '#0ea5e9', icon: '💧' },

@@ -1470,6 +1470,7 @@ export default function SupersetPluginChartHelloWorld(
       {activePanel === 'devices' && (
         <DevicesPanel
           devices={devices}
+          locations={pois}
           activePanel={activePanel}
           onNavigate={setActivePanel}
           onFocusDevice={device => {

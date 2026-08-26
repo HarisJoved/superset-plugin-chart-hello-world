@@ -153,6 +153,10 @@ export default function SensorSceneControl({
   const [pickingId, setPickingId] = useState<string | null>(null);
   const [expandedLocationId, setExpandedLocationId] = useState<string | null>(null);
   const [pickingLocationId, setPickingLocationId] = useState<string | null>(null);
+  // Search box inside whichever location's device checklist is open. Reset
+  // whenever a different location is expanded so a stale filter from one
+  // location doesn't silently hide devices in the next one.
+  const [locationDeviceFilter, setLocationDeviceFilter] = useState('');
   const [modelMaxDim, setModelMaxDim] = useState<number | null>(null);
   const [copyFeedback, setCopyFeedback] = useState<string>('');
   // Sensors the viewer found in its dataset query, published over the bridge.
@@ -303,6 +307,81 @@ export default function SensorSceneControl({
               ...patch,
             },
           ];
+      applyScene({ ...current, pois: nextList });
+    },
+    [applyScene],
+  );
+
+  /**
+   * One-location-per-device assignment, written as a single pass over the
+   * `pois` array so a device is never briefly (or permanently, if a second
+   * write races) a member of two locations at once. Checking a device in
+   * location B's checklist both adds it there *and* strips it from wherever
+   * else it was — that removal is the whole point of this helper, not
+   * something callers need to do separately.
+   */
+  const setDeviceLocation = useCallback(
+    (deviceId: string, targetLocationId: string, assign: boolean) => {
+      const current: SceneData = sceneRef.current ?? { devices: [] };
+      const list = current.pois ?? [];
+      const nextList = list.map(p => {
+        const ids = p.deviceIds ?? [];
+        if (p.id === targetLocationId) {
+          if (assign) {
+            return ids.includes(deviceId) ? p : { ...p, deviceIds: [...ids, deviceId] };
+          }
+          return ids.includes(deviceId)
+            ? { ...p, deviceIds: ids.filter(id => id !== deviceId) }
+            : p;
+        }
+        // Assigning to another location: drop it from every other one too.
+        if (assign && ids.includes(deviceId)) {
+          return { ...p, deviceIds: ids.filter(id => id !== deviceId) };
+        }
+        return p;
+      });
+      applyScene({ ...current, pois: nextList });
+    },
+    [applyScene],
+  );
+
+  /**
+   * Bulk "select all filtered" / "clear filtered" — the primary way someone
+   * assigns a batch of devices at once. Both are a single atomic write over
+   * `pois`, same as `setDeviceLocation`, and selecting still enforces
+   * one-location-per-device by pulling the selected ids out of every other
+   * location in the same pass.
+   */
+  const selectAllFiltered = useCallback(
+    (targetLocationId: string, deviceIds: string[]) => {
+      const current: SceneData = sceneRef.current ?? { devices: [] };
+      const list = current.pois ?? [];
+      const targetSet = new Set(deviceIds);
+      const nextList = list.map(p => {
+        const ids = p.deviceIds ?? [];
+        if (p.id === targetLocationId) {
+          const merged = new Set(ids);
+          targetSet.forEach(id => merged.add(id));
+          return { ...p, deviceIds: Array.from(merged) };
+        }
+        const filtered = ids.filter(id => !targetSet.has(id));
+        return filtered.length === ids.length ? p : { ...p, deviceIds: filtered };
+      });
+      applyScene({ ...current, pois: nextList });
+    },
+    [applyScene],
+  );
+
+  const clearFiltered = useCallback(
+    (targetLocationId: string, deviceIds: string[]) => {
+      const current: SceneData = sceneRef.current ?? { devices: [] };
+      const list = current.pois ?? [];
+      const dropSet = new Set(deviceIds);
+      const nextList = list.map(p => {
+        if (p.id !== targetLocationId) return p;
+        const ids = p.deviceIds ?? [];
+        return { ...p, deviceIds: ids.filter(id => !dropSet.has(id)) };
+      });
       applyScene({ ...current, pois: nextList });
     },
     [applyScene],
@@ -461,6 +540,17 @@ export default function SensorSceneControl({
   }
 
   const locations: LocationPoi[] = scene?.pois ?? [];
+
+  /** deviceId -> the location it's currently assigned to, built once so
+   * the checklist's "assigned elsewhere" badge doesn't scan every
+   * location's `deviceIds` per row on every render. */
+  const deviceLocationMap = useMemo(() => {
+    const map = new Map<string, string>();
+    locations.forEach(loc => {
+      (loc.deviceIds ?? []).forEach(id => map.set(id, loc.id));
+    });
+    return map;
+  }, [locations]);
 
   function toggleLocationPick(id: string) {
     if (pickingLocationId === id) {
@@ -966,7 +1056,10 @@ export default function SensorSceneControl({
             >
               <button
                 type="button"
-                onClick={() => setExpandedLocationId(expanded ? null : loc.id)}
+                onClick={() => {
+                  setExpandedLocationId(expanded ? null : loc.id);
+                  setLocationDeviceFilter('');
+                }}
                 style={{
                   width: '100%',
                   display: 'flex',
@@ -1068,6 +1161,169 @@ export default function SensorSceneControl({
                   <div style={{ fontSize: 10, color: '#8e94a1', margin: '2px 0 8px' }}>
                     Lower = camera sits closer when jumping here.
                   </div>
+
+                  {(() => {
+                    const assignedIds = new Set(loc.deviceIds ?? []);
+                    const filterText = locationDeviceFilter.trim().toLowerCase();
+                    const filteredDevices = filterText
+                      ? devices.filter(d => {
+                          const parsedId = parseSensorId(resolveNgsiId(d));
+                          const lbl = (
+                            parsedId.sensorName ||
+                            d.deviceName ||
+                            d.deviceId ||
+                            ''
+                          ).toLowerCase();
+                          return lbl.includes(filterText);
+                        })
+                      : devices;
+                    const filteredIds = filteredDevices.map(d => d.deviceId);
+
+                    return (
+                      <div style={{ marginBottom: 8 }}>
+                        <div
+                          style={{
+                            fontSize: 10,
+                            fontWeight: 700,
+                            color: '#8e94a1',
+                            textTransform: 'uppercase',
+                            letterSpacing: '0.03em',
+                            margin: '2px 0 4px',
+                            display: 'flex',
+                            alignItems: 'center',
+                            gap: 6,
+                          }}
+                        >
+                          Devices
+                          <span
+                            style={{
+                              color: '#8e94a1',
+                              fontWeight: 400,
+                              textTransform: 'none',
+                              letterSpacing: 0,
+                            }}
+                          >
+                            ({assignedIds.size} of {devices.length} assigned)
+                          </span>
+                        </div>
+
+                        <input
+                          type="text"
+                          value={locationDeviceFilter}
+                          onChange={e => setLocationDeviceFilter(e.target.value)}
+                          placeholder="Search devices…"
+                          style={{ ...numberInputStyle, marginBottom: 6 }}
+                        />
+
+                        <div style={{ display: 'flex', gap: 6, marginBottom: 6 }}>
+                          <button
+                            type="button"
+                            onClick={() => selectAllFiltered(loc.id, filteredIds)}
+                            disabled={filteredIds.length === 0}
+                            style={{
+                              ...buttonStyle,
+                              flex: 1,
+                              fontSize: 10,
+                              padding: '4px 6px',
+                              opacity: filteredIds.length === 0 ? 0.5 : 1,
+                            }}
+                          >
+                            Select all filtered ({filteredIds.length})
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => clearFiltered(loc.id, filteredIds)}
+                            disabled={filteredIds.length === 0}
+                            style={{
+                              ...buttonStyle,
+                              flex: 1,
+                              fontSize: 10,
+                              padding: '4px 6px',
+                              opacity: filteredIds.length === 0 ? 0.5 : 1,
+                            }}
+                          >
+                            Clear filtered
+                          </button>
+                        </div>
+
+                        <div
+                          style={{
+                            maxHeight: 160,
+                            overflowY: 'auto',
+                            border: '1px solid #e2e8f0',
+                            borderRadius: 4,
+                            padding: 4,
+                          }}
+                        >
+                          {filteredDevices.length === 0 && (
+                            <div style={{ fontSize: 11, color: '#8e94a1', padding: '4px 2px' }}>
+                              No devices match.
+                            </div>
+                          )}
+                          {filteredDevices.map(d => {
+                            const parsedId = parseSensorId(resolveNgsiId(d));
+                            const lbl = parsedId.sensorName || d.deviceName || d.deviceId;
+                            const checked = assignedIds.has(d.deviceId);
+                            const otherLocId = !checked
+                              ? deviceLocationMap.get(d.deviceId)
+                              : undefined;
+                            const otherLoc = otherLocId
+                              ? locations.find(l => l.id === otherLocId)
+                              : undefined;
+
+                            return (
+                              <label
+                                key={d.deviceId}
+                                style={{
+                                  display: 'flex',
+                                  alignItems: 'center',
+                                  gap: 6,
+                                  padding: '3px 2px',
+                                  fontSize: 11,
+                                  cursor: 'pointer',
+                                }}
+                              >
+                                <input
+                                  type="checkbox"
+                                  checked={checked}
+                                  onChange={e =>
+                                    setDeviceLocation(d.deviceId, loc.id, e.target.checked)
+                                  }
+                                />
+                                <span
+                                  style={{
+                                    overflow: 'hidden',
+                                    textOverflow: 'ellipsis',
+                                    whiteSpace: 'nowrap',
+                                    flex: 1,
+                                    color: '#323b48',
+                                  }}
+                                >
+                                  {lbl}
+                                </span>
+                                {otherLoc && (
+                                  <span
+                                    style={{
+                                      fontSize: 9,
+                                      color: '#b45309',
+                                      border: '1px solid #fde68a',
+                                      background: '#fffbeb',
+                                      borderRadius: 3,
+                                      padding: '0 4px',
+                                      flexShrink: 0,
+                                      whiteSpace: 'nowrap',
+                                    }}
+                                  >
+                                    in {otherLoc.name || 'Untitled location'}
+                                  </span>
+                                )}
+                              </label>
+                            );
+                          })}
+                        </div>
+                      </div>
+                    );
+                  })()}
 
                   <button
                     type="button"

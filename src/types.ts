@@ -96,6 +96,11 @@ export interface LocationPoi {
   /** How far back the camera sits when flying here, in the model's world
    * units. Falls back to a size-appropriate default when unset. */
   zoomDistance?: number;
+  /** Devices physically assigned to this location. One location per
+   * device — assigning a device here must remove it from wherever else it
+   * was assigned. Absent on scenes saved before this field existed; treat
+   * as `[]` rather than assuming it's always present. */
+  deviceIds?: string[];
 }
 
 /** Where the list of sensors comes from. */

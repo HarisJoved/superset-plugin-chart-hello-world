@@ -17,7 +17,7 @@
  * under the License.
  */
 import React, { useEffect, useMemo, useRef, useState } from 'react';
-import { DeviceDatum, isPlaced } from './types';
+import { DeviceDatum, LocationPoi, isPlaced } from './types';
 import {
   HistoryPoint,
   HistoryResult,
@@ -31,6 +31,7 @@ import {
   formatAttrLabel,
   formatAttrValue,
   hexToRgba,
+  modelStyle,
   resolveNgsiId,
   sensorDisplayName,
 } from './api';
@@ -49,23 +50,14 @@ const PAGE_SIZE = 20;
 const MAX_TABLE_ATTR_COLUMNS = 8;
 const COMPARE_COLORS = ['#2563eb', '#dc2626', '#16a34a', '#d97706', '#7c3aed', '#0891b2', '#db2777', '#65a30d'];
 
-const getModelColor = (key: string) => {
-  if (key === 'coolon-light') return '#eab308'; // yellow
-  if (key === OTHER_MODEL_KEY) return '#64748b'; // slate/gray
-  
-  // Generate consistent distinct colors for other models
-  const colors = ['#2563eb', '#16a34a', '#dc2626', '#7c3aed', '#0891b2', '#db2777', '#65a30d'];
-  let hash = 0;
-  for (let i = 0; i < key.length; i++) {
-    hash = key.charCodeAt(i) + ((hash << 5) - hash);
-  }
-  return colors[Math.abs(hash) % colors.length];
-};
-
 interface DevicesPanelProps {
   /** Every sensor the chart knows about  not just the placed ones, since
    * the table is a data-browsing tool independent of 3D placement. */
   devices: DeviceDatum[];
+  /** Camera-bookmark locations from the Customize panel's Locations editor,
+   * each optionally carrying a `deviceIds` list. Drives the left sidebar —
+   * omitted (or all-empty) callers simply don't get a sidebar. */
+  locations?: LocationPoi[];
   activePanel: PanelId;
   onNavigate: (panel: PanelId) => void;
   /** Switches to the 3D view and points the camera at this sensor. Omitted
@@ -81,9 +73,19 @@ type LatestEntry = { loading: boolean; data?: LatestDeviceData; error?: string }
  * history side by side. Sits on top of the 3D viewer as an overlay; the
  * shared PanelNav (bottom-left) is how you get back or over to Alerts.
  */
-export function DevicesPanel({ devices, activePanel, onNavigate, onFocusDevice }: DevicesPanelProps) {
+export function DevicesPanel({
+  devices,
+  locations = [],
+  activePanel,
+  onNavigate,
+  onFocusDevice,
+}: DevicesPanelProps) {
   const [search, setSearch] = useState('');
   const [modelFilter, setModelFilter] = useState<string>('__all__');
+  // '__all__' = no location filter, '__unassigned__' = the Unassigned
+  // bucket, otherwise a LocationPoi id. Independent of modelFilter/search —
+  // switching one must never reset the others.
+  const [locationFilter, setLocationFilter] = useState<string>('__all__');
   const [page, setPage] = useState(0);
   const [compareMode, setCompareMode] = useState(false);
   const [compareSelection, setCompareSelection] = useState<string[]>([]);
@@ -91,6 +93,41 @@ export function DevicesPanel({ devices, activePanel, onNavigate, onFocusDevice }
   const [historyDevice, setHistoryDevice] = useState<DeviceDatum | null>(null);
   const [alertsDevice, setAlertsDevice] = useState<DeviceDatum | null>(null);
   const [latestById, setLatestById] = useState<Record<string, LatestEntry>>({});
+
+  // Every device id currently in the roster, so a stale id left over in a
+  // location's `deviceIds` (dataset changed, sensor removed) can be told
+  // apart from a real assignment instead of turning into a phantom row or
+  // an inflated count.
+  const deviceIdSet = useMemo(() => new Set(devices.map(d => d.deviceId)), [devices]);
+
+  // deviceId -> the (still-existing) location it's assigned to. Built once
+  // per devices/locations change rather than scanned per row, since the
+  // devices list runs into the hundreds.
+  const deviceLocationMap = useMemo(() => {
+    const map = new Map<string, string>();
+    locations.forEach(loc => {
+      (loc.deviceIds ?? []).forEach(id => {
+        if (deviceIdSet.has(id)) map.set(id, loc.id);
+      });
+    });
+    return map;
+  }, [locations, deviceIdSet]);
+
+  // The sidebar only earns its place once someone has actually assigned a
+  // device somewhere — otherwise the panel looks exactly as it did before
+  // this feature existed.
+  const showLocationSidebar = useMemo(
+    () => locations.some(loc => (loc.deviceIds ?? []).length > 0),
+    [locations],
+  );
+
+  // A location can vanish (deleted in Customize) while it's still selected
+  // here — fall back to "All locations" rather than filtering against a
+  // location that no longer exists.
+  useEffect(() => {
+    if (locationFilter === '__all__' || locationFilter === '__unassigned__') return;
+    if (!locations.some(loc => loc.id === locationFilter)) setLocationFilter('__all__');
+  }, [locations, locationFilter]);
 
   const modelChips = useMemo(() => {
     const order: string[] = [];
@@ -127,19 +164,24 @@ export function DevicesPanel({ devices, activePanel, onNavigate, onFocusDevice }
     const q = search.trim().toLowerCase();
     return devices.filter(d => {
       if (modelFilter !== '__all__' && deviceModelKey(d) !== modelFilter) return false;
+      if (locationFilter === '__unassigned__') {
+        if (deviceLocationMap.has(d.deviceId)) return false;
+      } else if (locationFilter !== '__all__') {
+        if (deviceLocationMap.get(d.deviceId) !== locationFilter) return false;
+      }
       if (!q) return true;
       return (
         sensorDisplayName(d).toLowerCase().includes(q) ||
         d.deviceId.toLowerCase().includes(q)
       );
     });
-  }, [devices, search, modelFilter]);
+  }, [devices, search, modelFilter, locationFilter, deviceLocationMap]);
 
   // A filter/search change can leave `page` pointing past the new, shorter
-  // list  snap back to the first page rather than showing an empty table.
+  // list -- snap back to the first page rather than showing an empty table.
   useEffect(() => {
     setPage(0);
-  }, [search, modelFilter]);
+  }, [search, modelFilter, locationFilter]);
 
   const pageCount = Math.max(1, Math.ceil(filtered.length / PAGE_SIZE));
   const safePage = Math.min(page, pageCount - 1);
@@ -154,7 +196,7 @@ export function DevicesPanel({ devices, activePanel, onNavigate, onFocusDevice }
   // mount, `pageRows` briefly holds every device across every model before
   // that effect narrows it down. Starting real fetches against that
   // transient, about-to-be-replaced list was wasted work  and, worse, it's
-  // what caused rows to get stuck on "..." forever (see below).
+  // what caused rows to get stuck on "&" forever (see below).
   useEffect(() => {
     if (modelChips.length > 0 && !defaultFilterAppliedRef.current) return undefined;
 
@@ -164,7 +206,7 @@ export function DevicesPanel({ devices, activePanel, onNavigate, onFocusDevice }
 
     // Kept low and staggered on purpose: firing a burst of requests at the
     // gateway (this was 5-at-once, unstaggered) appears to be exactly what
-    // triggers rows getting stuck on "..." forever  the IoT gateway seems to
+    // triggers rows getting stuck on "&" forever  the IoT gateway seems to
     // rate-limit or silently drop concurrent bursts rather than queueing
     // them, and a plain `fetch()` with no timeout just hangs when that
     // happens (see `fetchWithTimeout` in api.ts for the other half of this
@@ -176,7 +218,7 @@ export function DevicesPanel({ devices, activePanel, onNavigate, onFocusDevice }
     // used to mean that if this effect got cancelled (e.g. the model
     // filter changing) before a staggered worker reached its turn, that
     // device already "had an entry" in `latestById` and so `toFetch` above
-    // would skip it on every future run  stranding it on "..." forever even
+    // would skip it on every future run  stranding it on "&" forever even
     // though its request never actually went out.
     const CONCURRENCY = 3;
     const STAGGER_MS = 120;
@@ -221,7 +263,7 @@ export function DevicesPanel({ devices, activePanel, onNavigate, onFocusDevice }
   // Attribute columns are now always derived from whatever's loaded for the
   // current page, regardless of whether a single model is selected  a
   // mixed page just ends up with the union of keys across models (capped),
-  // with '-' in cells where a given device doesn't report that attribute.
+  // with '' in cells where a given device doesn't report that attribute.
   // This is what actually puts the per-attribute columns (and their icons)
   // on screen instead of the old squashed "Latest" summary cell, which is
   // where they were going missing before.
@@ -309,8 +351,7 @@ export function DevicesPanel({ devices, activePanel, onNavigate, onFocusDevice }
               pointerEvents: 'none',
             }}
           >
-            =
-
+            🔍
           </span>
           <input
             type="text"
@@ -324,7 +365,7 @@ export function DevicesPanel({ devices, activePanel, onNavigate, onFocusDevice }
         <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', flex: 1 }}>
           {modelChips.map(chip => {
             const active = modelFilter === chip.key;
-            const color = getModelColor(chip.key);
+            const style = modelStyle(chip.key);
             return (
               <button
                 key={chip.key}
@@ -332,9 +373,9 @@ export function DevicesPanel({ devices, activePanel, onNavigate, onFocusDevice }
                 onClick={() => setModelFilter(active ? '__all__' : chip.key)}
                 style={{
                   ...chipStyle,
-                  color: active ? '#0b0f17' : color,
-                  background: active ? color : hexToRgba(color, 0.14),
-                  border: `1px solid ${active ? color : hexToRgba(color, 0.4)}`,
+                  color: active ? '#0b0f17' : style.color,
+                  background: active ? style.color : hexToRgba(style.color, 0.14),
+                  border: `1px solid ${active ? style.color : hexToRgba(style.color, 0.4)}`,
                 }}
               >
                 {chip.label}: {chip.count}
@@ -345,7 +386,7 @@ export function DevicesPanel({ devices, activePanel, onNavigate, onFocusDevice }
 
         {!compareMode ? (
           <button type="button" onClick={() => setCompareMode(true)} style={compareButtonStyle}>
-            � Compare
+            ⇄ Compare
           </button>
         ) : (
           <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
@@ -373,6 +414,18 @@ export function DevicesPanel({ devices, activePanel, onNavigate, onFocusDevice }
         )}
       </div>
 
+      <div style={{ display: 'flex', flex: 1, minHeight: 0 }}>
+        {showLocationSidebar && (
+          <LocationSidebar
+            locations={locations}
+            deviceLocationMap={deviceLocationMap}
+            deviceIdSet={deviceIdSet}
+            selected={locationFilter}
+            onSelect={setLocationFilter}
+          />
+        )}
+
+        <div style={{ display: 'flex', flexDirection: 'column', flex: 1, minWidth: 0 }}>
       <div style={{ flex: 1, overflow: 'auto', padding: '4px 20px 20px' }}>
         {filtered.length === 0 ? (
           <div style={{ padding: '40px 0', textAlign: 'center', color: '#64748b' }}>
@@ -398,7 +451,7 @@ export function DevicesPanel({ devices, activePanel, onNavigate, onFocusDevice }
               {pageRows.map(device => {
                 const entry = latestById[device.deviceId];
                 const key = deviceModelKey(device);
-                const color = getModelColor(key);
+                const style = modelStyle(key);
                 const placed = isPlaced(device);
                 const rowDisabledForCompare =
                   compareMode && compareModelKey !== null && key !== compareModelKey;
@@ -445,13 +498,51 @@ export function DevicesPanel({ devices, activePanel, onNavigate, onFocusDevice }
                         ...rowCardStyle,
                         ...(compareMode ? {} : firstCellRadius),
                         background: cellBg,
+                        minWidth: 170,
                       }}
                     >
-                      <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
-                        <div>
-                          <div style={{ fontWeight: 700 }}>{sensorDisplayName(device)}</div>
+                      <div style={{ display: 'flex', alignItems: 'center', gap: 10, minWidth: 0 }}>
+                        <span
+                          aria-hidden
+                          style={{
+                            width: 30,
+                            height: 30,
+                            flexShrink: 0,
+                            borderRadius: 8,
+                            display: 'flex',
+                            alignItems: 'center',
+                            justifyContent: 'center',
+                            fontSize: 14,
+                            background: hexToRgba(style.color, 0.18),
+                            border: `1px solid ${hexToRgba(style.color, 0.45)}`,
+                          }}
+                        >
+                          {style.icon}
+                        </span>
+                        <div style={{ minWidth: 0, overflow: 'hidden' }}>
+                          <div
+                            title={sensorDisplayName(device)}
+                            style={{
+                              fontWeight: 700,
+                              whiteSpace: 'nowrap',
+                              overflow: 'hidden',
+                              textOverflow: 'ellipsis',
+                            }}
+                          >
+                            {sensorDisplayName(device)}
+                          </div>
                           {key !== OTHER_MODEL_KEY && (
-                            <div style={{ fontSize: 11, color: color }}>{key}</div>
+                            <div
+                              style={{
+                                fontSize: 11,
+                                color: style.color,
+                                whiteSpace: 'nowrap',
+                                overflow: 'hidden',
+                                textOverflow: 'ellipsis',
+                              }}
+                            >
+                              {key}
+                            </div>
                           )}
                         </div>
                       </div>
@@ -513,7 +604,7 @@ export function DevicesPanel({ devices, activePanel, onNavigate, onFocusDevice }
                             cursor: placed && onFocusDevice ? 'pointer' : 'not-allowed',
                           }}
                         >
-                          
+                          🎯
                         </button>
                         <button
                           type="button"
@@ -526,7 +617,7 @@ export function DevicesPanel({ devices, activePanel, onNavigate, onFocusDevice }
                             background: 'rgba(248,113,113,0.1)',
                           }}
                         >
-                          =
+                          🔔
                         </button>
                       </div>
                     </td>
@@ -556,7 +647,7 @@ export function DevicesPanel({ devices, activePanel, onNavigate, onFocusDevice }
             onClick={() => setPage(p => Math.max(0, p - 1))}
             style={{ ...backButtonStyle, opacity: safePage === 0 ? 0.4 : 1 }}
           >
-            9 Prev
+            ‹ Prev
           </button>
           <span style={{ color: '#94a3b8' }}>
             Page {safePage + 1} of {pageCount}
@@ -567,10 +658,12 @@ export function DevicesPanel({ devices, activePanel, onNavigate, onFocusDevice }
             onClick={() => setPage(p => Math.min(pageCount - 1, p + 1))}
             style={{ ...backButtonStyle, opacity: safePage >= pageCount - 1 ? 0.4 : 1 }}
           >
-            Next :
+            Next ›
           </button>
         </div>
       )}
+        </div>
+      </div>
 
       {historyDevice && (
         <HistoryDrawer device={historyDevice} onClose={() => setHistoryDevice(null)} />
@@ -644,6 +737,223 @@ function DateRangeFilter({
 }
 
 /* ------------------------------------------------------------------ */
+/* Location sidebar -- browse devices by where they physically are,   */
+/* an independent filter dimension alongside the model chips.          */
+/* ------------------------------------------------------------------ */
+
+interface LocationSidebarProps {
+  locations: LocationPoi[];
+  deviceLocationMap: Map<string, string>;
+  deviceIdSet: Set<string>;
+  selected: string;
+  onSelect: (id: string) => void;
+}
+
+function LocationSidebar({
+  locations,
+  deviceLocationMap,
+  deviceIdSet,
+  selected,
+  onSelect,
+}: LocationSidebarProps) {
+  // Local to the sidebar -- collapsing is purely a display preference, not
+  // filter state, so it doesn't need to live in the parent panel.
+  const [collapsed, setCollapsed] = useState(false);
+
+  // Only locations that still have at least one assigned device count as
+  // "populated" here -- a location with an empty (or all-phantom) list
+  // would otherwise clutter the list with a permanent zero.
+  const populated = locations
+    .filter(loc => (loc.deviceIds ?? []).length > 0)
+    .map(loc => ({
+      loc,
+      count: (loc.deviceIds ?? []).filter(id => deviceIdSet.has(id)).length,
+    }));
+
+  const unassignedCount = Array.from(deviceIdSet).filter(
+    id => !deviceLocationMap.has(id),
+  ).length;
+
+  return (
+    <div
+      style={{
+        width: collapsed ? 52 : 200,
+        flexShrink: 0,
+        borderRight: '1px solid #1f2733',
+        overflowY: 'auto',
+        overflowX: 'hidden',
+        padding: collapsed ? '14px 6px' : '14px 10px',
+      }}
+    >
+      <div
+        style={{
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: collapsed ? 'center' : 'space-between',
+          marginBottom: 8,
+          padding: collapsed ? 0 : '0 6px',
+        }}
+      >
+        {!collapsed && (
+          <div
+            style={{
+              fontSize: 11,
+              fontWeight: 700,
+              color: '#64748b',
+              textTransform: 'uppercase',
+              letterSpacing: '0.04em',
+            }}
+          >
+            Locations
+          </div>
+        )}
+        <button
+          type="button"
+          onClick={() => setCollapsed(c => !c)}
+          title={collapsed ? 'Expand locations' : 'Collapse locations'}
+          style={{
+            width: 22,
+            height: 22,
+            flexShrink: 0,
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            borderRadius: 6,
+            border: '1px solid #232b38',
+            background: '#12181f',
+            color: '#94a3b8',
+            fontSize: 11,
+            cursor: 'pointer',
+          }}
+        >
+          {collapsed ? '»' : '«'}
+        </button>
+      </div>
+
+      <SidebarEntry
+        label="All locations"
+        active={selected === '__all__'}
+        onClick={() => onSelect('__all__')}
+        collapsed={collapsed}
+      />
+
+      {populated.map(({ loc, count }) => (
+        <SidebarEntry
+          key={loc.id}
+          label={loc.name || 'Untitled location'}
+          count={count}
+          active={selected === loc.id}
+          onClick={() => onSelect(loc.id)}
+          collapsed={collapsed}
+        />
+      ))}
+
+      <div style={{ height: 1, background: '#1f2733', margin: '8px 6px' }} />
+
+      <SidebarEntry
+        label="Unassigned"
+        count={unassignedCount}
+        active={selected === '__unassigned__'}
+        onClick={() => onSelect('__unassigned__')}
+        collapsed={collapsed}
+      />
+    </div>
+  );
+}
+
+function SidebarEntry({
+  label,
+  count,
+  active,
+  onClick,
+  collapsed,
+}: {
+  label: string;
+  count?: number;
+  active: boolean;
+  onClick: () => void;
+  collapsed?: boolean;
+}) {
+  if (collapsed) {
+    return (
+      <button
+        type="button"
+        onClick={onClick}
+        title={typeof count === 'number' ? `${label} (${count})` : label}
+        style={{
+          width: '100%',
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'center',
+          padding: '8px 2px',
+          marginBottom: 2,
+          borderRadius: 7,
+          border: 'none',
+          background: active ? 'rgba(37,99,235,0.16)' : 'transparent',
+          color: active ? '#ffffff' : '#94a3b8',
+          fontSize: 11,
+          fontWeight: 700,
+          cursor: active ? 'default' : 'pointer',
+        }}
+      >
+        {typeof count === 'number' ? count : '•'}
+      </button>
+    );
+  }
+
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      style={{
+        width: '100%',
+        display: 'flex',
+        alignItems: 'center',
+        gap: 8,
+        padding: '8px',
+        marginBottom: 2,
+        borderRadius: 7,
+        border: 'none',
+        background: active ? 'rgba(37,99,235,0.16)' : 'transparent',
+        color: active ? '#ffffff' : '#94a3b8',
+        fontSize: 12,
+        fontWeight: active ? 700 : 500,
+        textAlign: 'left',
+        cursor: active ? 'default' : 'pointer',
+      }}
+    >
+      <span
+        style={{
+          overflow: 'hidden',
+          textOverflow: 'ellipsis',
+          whiteSpace: 'nowrap',
+          flex: 1,
+        }}
+      >
+        {label}
+      </span>
+      {typeof count === 'number' && (
+        <span
+          style={{
+            fontSize: 10,
+            fontWeight: 700,
+            color: active ? 'white' : '#64748b',
+            background: active ? 'rgba(255,255,255,0.18)' : 'rgba(148,163,184,0.14)',
+            borderRadius: 999,
+            padding: '1px 7px',
+            minWidth: 16,
+            textAlign: 'center',
+            flexShrink: 0,
+          }}
+        >
+          {count}
+        </span>
+      )}
+    </button>
+  );
+}
+
+/* ------------------------------------------------------------------ */
 /* Single-sensor history drawer  same data as the 3D view's graph     */
 /* modal, just reachable from the table instead of a marker click.     */
 /* ------------------------------------------------------------------ */
@@ -683,7 +993,7 @@ function HistoryDrawer({ device, onClose }: { device: DeviceDatum; onClose: () =
   return (
     <Drawer onClose={onClose} title={`${sensorDisplayName(device)}  history`}>
       <DateRangeFilter from={from} to={to} onFromChange={setFrom} onToChange={setTo} onApply={load} />
-      {loading && <div style={{ color: '#94a3b8' }}>Loading...</div>}
+      {loading && <div style={{ color: '#94a3b8' }}>Loading&</div>}
       {!loading && error && <div style={{ color: '#f87171', fontSize: 12 }}>{error}</div>}
       {!loading && !error && result && (
         <>
@@ -742,7 +1052,7 @@ function DeviceAlertsDrawer({ device, onClose }: { device: DeviceDatum; onClose:
   }, [deviceId]);
 
   return (
-    <Drawer onClose={onClose} title={`${sensorDisplayName(device)}  alerts`}>
+    <Drawer onClose={onClose} title={`${sensorDisplayName(device)} — alerts`}>
       {loading && <div style={{ color: '#94a3b8' }}>Loading...</div>}
       {!loading && error && <div style={{ color: '#f87171', fontSize: 12 }}>{error}</div>}
       {!loading && !error && alerts.length === 0 && (
@@ -899,7 +1209,7 @@ function CompareDrawer({ devices, onClose }: { devices: DeviceDatum[]; onClose: 
         ))}
       </div>
 
-      {anyLoading && <div style={{ color: '#94a3b8', marginBottom: 12 }}>Loading history...</div>}
+      {anyLoading && <div style={{ color: '#94a3b8', marginBottom: 12 }}>Loading history&</div>}
 
       {attributes.length === 0 && !anyLoading && (
         <div style={{ color: '#64748b' }}>No comparable numeric history available.</div>
@@ -1019,8 +1329,8 @@ function MultiSeriesChart({
           const avg = values.reduce((a, b) => a + b, 0) / values.length;
           return (
             <div key={s.label} style={{ fontSize: 11, color: '#475569' }}>
-              <span style={{ color: s.color, fontWeight: 700 }}>{s.label}</span>: min {min.toFixed(1)}  max{' '}
-              {max.toFixed(1)}  avg {avg.toFixed(1)}
+              <span style={{ color: s.color, fontWeight: 700 }}>{s.label}</span>: min {min.toFixed(1)} � max{' '}
+              {max.toFixed(1)} � avg {avg.toFixed(1)}
             </div>
           );
         })}
@@ -1159,7 +1469,7 @@ const tdStyle: React.CSSProperties = {
 };
 
 /** Background applied to every cell in a row so the row reads as one
- * rounded card instead of a plain ruled table line  paired with the
+ * rounded card instead of a plain ruled table line  paired with the
  * borderSpacing set on the <table> and the corner radii applied to each
  * row's first/last cell. */
 const rowCardStyle: React.CSSProperties = {
